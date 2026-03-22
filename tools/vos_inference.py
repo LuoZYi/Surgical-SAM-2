@@ -13,6 +13,7 @@ import torch
 import json
 from PIL import Image
 from sympy import evaluate
+import inspect
 
 from sam2.build_sam import build_sam2_video_predictor
 from sav_dataset.utils.endo_sav_benchmark import benchmark
@@ -404,12 +405,29 @@ def main():
     print('Warning: only support evaluating one object per sequence and saving in object directories.')
     print('Testing with first frame prompt file:', args.first_frame_prompt_file)
 
+    # predictor = build_sam2_video_predictor(
+    #     config_file=args.sam2_cfg,
+    #     ckpt_path=args.sam2_checkpoint,
+    #     apply_postprocessing=args.apply_postprocessing,
+    #     hydra_overrides_extra=[],
+    # )
+
     predictor = build_sam2_video_predictor(
         config_file=args.sam2_cfg,
         ckpt_path=args.sam2_checkpoint,
         apply_postprocessing=args.apply_postprocessing,
-        hydra_overrides_extra=[],
+        hydra_overrides_extra=[
+            "++model._target_=sam2.sam2_video_predictor_new.SAM2VideoPredictorNew",
+            "++model.memory_prune_mode=off",
+            "++model.num_frame_to_prune=0",
+            "++model.protect_conditioning_memories=false",
+        ],
     )
+
+
+    print("Predictor class:", type(predictor))
+    print("Predictor file:", inspect.getfile(type(predictor)))
+    print("Has methods:", [x for x in dir(predictor) if "propagate" in x or "memory" in x])
 
     if args.use_all_masks:
         print("using all available masks in input_mask_dir as input to the SAM 2 model")
