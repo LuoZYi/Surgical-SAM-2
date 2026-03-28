@@ -393,6 +393,36 @@ def main():
         action="store_true",
     )
     parser.add_argument(
+    "--memory_prune_mode",
+    type=str,
+    default="efp",
+    choices=["off", "efp", "rule_based", "state_aware"],
+    )
+    parser.add_argument(
+        "--memory_score_mode",
+        type=str,
+        default="cosine_only",
+        choices=["cosine_only", "cosine_motion", "cosine_motion_geometry"],
+    )
+    parser.add_argument(
+        "--num_frame_to_prune",
+        type=int,
+        default=2,
+    )
+    parser.add_argument(
+        "--protect_conditioning_memories",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--debug_memory_pruning",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--memory_min_temporal_gap",
+        type=int,
+        default=0,
+)
+    parser.add_argument(
         "--do_not_skip_first_and_last_frame",
         help="In SA-V val and test, we skip the first and the last annotated frames in evaluation. "
              "Set this to true for evaluation on settings that doen't skip first and last frames",
@@ -412,22 +442,39 @@ def main():
     #     hydra_overrides_extra=[],
     # )
 
+    # predictor = build_sam2_video_predictor(
+    #     config_file=args.sam2_cfg,
+    #     ckpt_path=args.sam2_checkpoint,
+    #     apply_postprocessing=args.apply_postprocessing,
+    #     hydra_overrides_extra=[
+    #         "++model._target_=sam2.sam2_video_predictor_new.SAM2VideoPredictorNew",
+    #         "++model.memory_prune_mode=off",
+    #         "++model.num_frame_to_prune=0",
+    #         "++model.protect_conditioning_memories=false",
+    #     ],
+    # )
+    hydra_overrides = [
+        "++model._target_=sam2.sam2_video_predictor_new.SAM2VideoPredictorNew",
+        f"++model.memory_prune_mode={args.memory_prune_mode}",
+        f"++model.memory_score_mode={args.memory_score_mode}",
+        f"++model.num_frame_to_prune={args.num_frame_to_prune}",
+        f"++model.memory_min_temporal_gap={args.memory_min_temporal_gap}",
+        f"++model.protect_conditioning_memories={'true' if args.protect_conditioning_memories else 'false'}",
+        f"++model.debug_memory_pruning={'true' if args.debug_memory_pruning else 'false'}",
+    ]
     predictor = build_sam2_video_predictor(
         config_file=args.sam2_cfg,
         ckpt_path=args.sam2_checkpoint,
         apply_postprocessing=args.apply_postprocessing,
-        hydra_overrides_extra=[
-            "++model._target_=sam2.sam2_video_predictor_new.SAM2VideoPredictorNew",
-            "++model.memory_prune_mode=off",
-            "++model.num_frame_to_prune=0",
-            "++model.protect_conditioning_memories=false",
-        ],
+        hydra_overrides_extra=hydra_overrides,
     )
 
 
     print("Predictor class:", type(predictor))
     print("Predictor file:", inspect.getfile(type(predictor)))
-    print("Has methods:", [x for x in dir(predictor) if "propagate" in x or "memory" in x])
+    print("memory_prune_mode:", getattr(predictor, "memory_prune_mode", None))
+    print("memory_score_mode:", getattr(predictor, "memory_score_mode", None))
+    print("num_frame_to_prune:", getattr(predictor, "num_frame_to_prune", None))
 
     if args.use_all_masks:
         print("using all available masks in input_mask_dir as input to the SAM 2 model")
