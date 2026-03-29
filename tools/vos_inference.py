@@ -232,6 +232,17 @@ def vos_separate_inference_per_object(
             start_frame_idx=min(input_frame_inds),
             reverse=False,
         ):
+            if out_frame_idx < 10:
+                dbg = predictor._last_memory_prune_debug
+                print(f"\n[DBG] object_id={object_id}, frame={out_frame_idx}")
+                print("mode:", dbg.get("mode"))
+                print("score_mode:", dbg.get("score_mode"))
+                print("pruned_frame_idx:", dbg.get("pruned_frame_idx"))
+                print("candidate_frame_idx:", dbg.get("candidate_frame_idx"))
+                print("candidate_similarities_mean:", dbg.get("candidate_similarities_mean"))
+                print("candidate_motion:", dbg.get("candidate_motion"))
+                print("candidate_geometry_overlap:", dbg.get("candidate_geometry_overlap"))
+                print("candidate_drop_scores:", dbg.get("candidate_drop_scores"))
             obj_scores = out_mask_logits.cpu().numpy()
             output_scores_per_object[object_id][out_frame_idx] = obj_scores
     video_segments = {}

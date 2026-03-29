@@ -47,4 +47,5 @@ mkdir -p /home/e/e0968951/fyp/Surgical-SAM-2/results/debug_seq2_rb_cosmotiongeo
   --memory_prune_mode rule_based \
   --memory_score_mode cosine_motion_geometry \
   --num_frame_to_prune 2 \
-  --protect_conditioning_memories
+  --protect_conditioning_memories \
+  --debug_memory_pruning
