@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 #from sam2.modeling.sam2_base import NO_OBJ_SCORE, SAM2Base
 from sam2.modeling.sam2_base import NO_OBJ_SCORE
-from sam2.modeling.sam2_newbase import SAM2NewBase
+from sam2.modeling.sam2_new_base import SAM2NewBase
 from sam2.utils.misc import concat_points, fill_holes_in_mask_scores, load_video_frames
 
 

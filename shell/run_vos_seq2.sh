@@ -22,6 +22,19 @@ export PYTHONPATH=/home/e/e0968951/fyp/Surgical-SAM-2:$PYTHONPATH
 
 mkdir -p /home/e/e0968951/fyp/Surgical-SAM-2/results/debug_seq2
 
+
+
+#/home/e/e0968951/fyp/fyp_env/bin/python tools/vos_inference.py \
+#  --sam2_cfg configs/sam2.1/sam2.1_hiera_s.yaml \
+#  --sam2_checkpoint ./checkpoints/sam2.1_hiera_s_endo18.pth \
+#  --output_mask_dir ./results/debug_seq2_off \
+#  --input_mask_dir ./dataset/endovis18_debug/train/VOS/Annotations_vos_instrument \
+#  --base_video_dir ./dataset/endovis18_debug/train/JPEGImages \
+#  --gt_root ./dataset/endovis18_debug/train/Annotations \
+#  --gpu_id 0 \
+#  --video_list_file ./one_video.txt
+
+
 /home/e/e0968951/fyp/fyp_env/bin/python tools/vos_inference.py \
   --sam2_cfg configs/sam2.1/sam2.1_hiera_s.yaml \
   --sam2_checkpoint ./checkpoints/sam2.1_hiera_s_endo18.pth \
@@ -30,4 +43,6 @@ mkdir -p /home/e/e0968951/fyp/Surgical-SAM-2/results/debug_seq2
   --base_video_dir ./dataset/endovis18_debug/train/JPEGImages \
   --gt_root ./dataset/endovis18_debug/train/Annotations \
   --gpu_id 0 \
-  --video_list_file ./one_video.txt
+  --video_list_file ./one_video.txt \
+  --memory_prune_mode off \
+  --num_frame_to_prune 0

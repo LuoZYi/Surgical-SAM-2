@@ -1,635 +1,520 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+
 """
-Utilities for memory-bank pruning in SAM2NewBase.
+A minimally invasive extension of SAM2Base that keeps the upstream file untouched,
+while making memory pruning modular and easy to ablate.
 
-This file keeps the pruning logic separate from the model plumbing so you can run
-clean ablations:
-
-- prune_mode:
+What this adds:
+- prune mode switch:
     off | efp | rule_based | state_aware
+- score mode switch for rule_based / state_aware:
+    cosine_only | cosine_motion | cosine_motion_geometry
+- optional protection for conditioning memories
+- lightweight debug bookkeeping via `self._last_memory_prune_debug`
 
-- score_mode (used by rule_based / state_aware):
-    cosine_only
-    cosine_motion
-    cosine_motion_geometry
+Recommended usage:
+    from sam2.modeling.sam2_newbase import SAM2NewBase
 
-Design notes
-------------
-1) `efp` preserves the released SurgSAM2 behavior as closely as possible:
-   candidate memories are compared to the latest memory using cosine similarity,
-   and the most similar frames are dropped.
-
-2) `rule_based` uses an explicit redundancy score:
-      redundancy = appearance similarity
-                  - motion diversity
-                  + geometry overlap
-                  + optional temporal closeness bonus
-
-3) `state_aware` keeps the same score family, but adapts pruning aggressiveness
-   and score weights online from a light-weight state:
-      s_t = [redundancy, motion_change, confidence]
-
-All functions are inference-safe and gracefully fall back if some metadata
-(e.g. masks / IoU / object score) is unavailable.
+Then point your model builder / config at SAM2NewBase instead of SAM2Base.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
-import torch.nn.functional as F
+
+from sam2.modeling.memory_pruning import plan_memory_pruning
+from sam2.modeling.sam2_base import SAM2Base
+from sam2.modeling.sam2_utils import get_1d_sine_pe, select_closest_cond_frames
 
 
-# -------------------------
-# Small generic helpers
-# -------------------------
+class SAM2NewBase(SAM2Base):
+    def __init__(
+        self,
+        *args,
+        memory_prune_mode: str = "efp",   # off | efp | rule_based | state_aware
+        memory_score_mode: str = "cosine_only",  # cosine_only | cosine_motion | cosine_motion_geometry
+        protect_conditioning_memories: bool = False,
+        memory_similarity_threshold: Optional[float] = None,
+        memory_min_temporal_gap: int = 0,
+        debug_memory_pruning: bool = False,
+        state_controller_cfg: Optional[Dict[str, float]] = None,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.memory_prune_mode = memory_prune_mode
+        self.memory_score_mode = memory_score_mode
+        self.protect_conditioning_memories = protect_conditioning_memories
+        self.memory_similarity_threshold = memory_similarity_threshold
+        self.memory_min_temporal_gap = memory_min_temporal_gap
+        self.debug_memory_pruning = debug_memory_pruning
+        self.state_controller_cfg = dict(state_controller_cfg or {})
+        self._last_memory_prune_debug: Dict[str, Any] = {}
 
-def _as_float(value: Any, default: float = 0.0) -> float:
-    if value is None:
-        return default
-    if isinstance(value, torch.Tensor):
-        if value.numel() == 0:
-            return default
-        return float(value.detach().float().mean().item())
-    try:
-        return float(value)
-    except Exception:
-        return default
+    # ---------------------------------------------------------------------
+    # Metadata extraction
+    # ---------------------------------------------------------------------
 
-
-def _as_pair(value: Any) -> Optional[Tuple[float, float]]:
-    if value is None:
+    def _extract_first_available_tensor(
+        self,
+        container: Dict[str, Any],
+        keys: List[str],
+    ) -> Optional[torch.Tensor]:
+        for key in keys:
+            value = container.get(key, None)
+            if isinstance(value, torch.Tensor):
+                return value
         return None
-    if isinstance(value, torch.Tensor):
-        value = value.detach().flatten().tolist()
-    if isinstance(value, (list, tuple)) and len(value) >= 2:
-        try:
-            return float(value[0]), float(value[1])
-        except Exception:
-            return None
-    return None
 
-
-def _as_box(value: Any) -> Optional[Tuple[float, float, float, float]]:
-    if value is None:
-        return None
-    if isinstance(value, torch.Tensor):
-        value = value.detach().flatten().tolist()
-    if isinstance(value, (list, tuple)) and len(value) >= 4:
-        try:
-            return float(value[0]), float(value[1]), float(value[2]), float(value[3])
-        except Exception:
-            return None
-    return None
-
-
-def _clamp_tensor_01(x: torch.Tensor) -> torch.Tensor:
-    return torch.clamp(x, 0.0, 1.0)
-
-
-def _bbox_iou_xyxy(
-    box1: Optional[Tuple[float, float, float, float]],
-    box2: Optional[Tuple[float, float, float, float]],
-) -> float:
-    if box1 is None or box2 is None:
-        return 0.0
-
-    x1 = max(box1[0], box2[0])
-    y1 = max(box1[1], box2[1])
-    x2 = min(box1[2], box2[2])
-    y2 = min(box1[3], box2[3])
-
-    inter_w = max(0.0, x2 - x1)
-    inter_h = max(0.0, y2 - y1)
-    inter = inter_w * inter_h
-
-    area1 = max(0.0, box1[2] - box1[0]) * max(0.0, box1[3] - box1[1])
-    area2 = max(0.0, box2[2] - box2[0]) * max(0.0, box2[3] - box2[1])
-    union = area1 + area2 - inter
-
-    if union <= 1e-8:
-        return 0.0
-    return inter / union
-
-
-# -------------------------
-# Appearance similarity
-# -------------------------
-
-def cosine_similarity_to_last_raw(
-    candidate_frames: torch.Tensor,
-    last_frame: torch.Tensor,
-) -> torch.Tensor:
-    """
-    Exact EFP-style aggregation.
-
-    candidate_frames: [N, HW, B, C]
-    last_frame:       [HW, B, C]
-    returns:          [N]
-
-    This matches the inlined SurgSAM2/SAM2NewBase-style behavior:
-      1) cosine similarity along channel dim
-      2) sum over token dim
-      3) mean over batch dim
-    """
-    if candidate_frames.numel() == 0:
-        return candidate_frames.new_zeros((0,))
-    last_frame_expanded = last_frame.unsqueeze(0).expand_as(candidate_frames)
-    similarities = F.cosine_similarity(candidate_frames, last_frame_expanded, dim=-1)
-    similarities = similarities.sum(dim=1)   # [N, B]
-    similarities = similarities.mean(dim=1)  # [N]
-    return similarities
-
-
-def cosine_similarity_to_last_mean(
-    candidate_frames: torch.Tensor,
-    last_frame: torch.Tensor,
-) -> torch.Tensor:
-    """
-    Mean-normalized cosine similarity in [-1, 1], better for readable scores and
-    thresholding in rule-based / state-aware modes.
-    """
-    if candidate_frames.numel() == 0:
-        return candidate_frames.new_zeros((0,))
-    last_frame_expanded = last_frame.unsqueeze(0).expand_as(candidate_frames)
-    similarities = F.cosine_similarity(candidate_frames, last_frame_expanded, dim=-1)
-    similarities = similarities.mean(dim=1)  # [N, B]
-    similarities = similarities.mean(dim=1)  # [N]
-    return similarities
-
-
-# -------------------------
-# Metadata-driven signals
-# -------------------------
-
-def temporal_closeness_to_last(
-    candidate_meta: Sequence[Dict[str, Any]],
-    last_meta: Dict[str, Any],
-    device: torch.device,
-    min_temporal_gap: int = 0,
-) -> torch.Tensor:
-    """
-    Higher => temporally closer to the latest memory => more likely redundant.
-    Range is roughly [0, 1], with a small extra boost if the gap is smaller than
-    `min_temporal_gap`.
-    """
-    last_idx = last_meta.get("frame_idx", None)
-    scores: List[float] = []
-
-    for meta in candidate_meta:
-        cand_idx = meta.get("frame_idx", None)
-        if last_idx is None or cand_idx is None:
-            scores.append(0.0)
-            continue
-
-        gap = abs(int(last_idx) - int(cand_idx))
-        closeness = 1.0 / float(gap + 1)
-        if min_temporal_gap > 0 and gap < min_temporal_gap:
-            closeness += 0.5
-        scores.append(closeness)
-
-    if len(scores) == 0:
-        return torch.zeros(0, device=device)
-    return torch.tensor(scores, device=device, dtype=torch.float32)
-
-
-def pairwise_motion_to_last(
-    candidate_meta: Sequence[Dict[str, Any]],
-    last_meta: Dict[str, Any],
-    device: torch.device,
-) -> torch.Tensor:
-    """
-    Higher => more motion / geometry difference from latest memory => *less* redundant.
-    Uses normalized centroid distance and a small area-change term.
-    """
-    last_centroid = _as_pair(last_meta.get("centroid_xy"))
-    last_area = _as_float(last_meta.get("area_ratio"), default=0.0)
-
-    vals: List[float] = []
-    for meta in candidate_meta:
-        cand_centroid = _as_pair(meta.get("centroid_xy"))
-        cand_area = _as_float(meta.get("area_ratio"), default=0.0)
-
-        centroid_dist = 0.0
-        if last_centroid is not None and cand_centroid is not None:
-            dx = cand_centroid[0] - last_centroid[0]
-            dy = cand_centroid[1] - last_centroid[1]
-            centroid_dist = (dx * dx + dy * dy) ** 0.5
-            centroid_dist = min(1.0, centroid_dist / (2.0 ** 0.5))  # normalize by diagonal
-
-        area_change = min(1.0, abs(cand_area - last_area))
-        motion = 0.8 * centroid_dist + 0.2 * area_change
-        vals.append(float(motion))
-
-    if len(vals) == 0:
-        return torch.zeros(0, device=device)
-    return torch.tensor(vals, device=device, dtype=torch.float32)
-
-
-def pairwise_geometry_overlap_to_last(
-    candidate_meta: Sequence[Dict[str, Any]],
-    last_meta: Dict[str, Any],
-    device: torch.device,
-) -> torch.Tensor:
-    """
-    Higher => more geometry overlap with latest memory => more redundant.
-    Uses bbox IoU and area similarity.
-    """
-    last_box = _as_box(last_meta.get("bbox_xyxy"))
-    last_area = _as_float(last_meta.get("area_ratio"), default=0.0)
-
-    vals: List[float] = []
-    for meta in candidate_meta:
-        cand_box = _as_box(meta.get("bbox_xyxy"))
-        cand_area = _as_float(meta.get("area_ratio"), default=0.0)
-
-        bbox_iou = _bbox_iou_xyxy(cand_box, last_box)
-        area_similarity = max(0.0, 1.0 - abs(cand_area - last_area))
-        overlap = 0.7 * bbox_iou + 0.3 * area_similarity
-        vals.append(float(overlap))
-
-    if len(vals) == 0:
-        return torch.zeros(0, device=device)
-    return torch.tensor(vals, device=device, dtype=torch.float32)
-
-
-def estimate_online_state(
-    sim_mean_to_last: torch.Tensor,
-    memory_meta: Sequence[Dict[str, Any]],
-    device: torch.device,
-) -> Dict[str, float]:
-    """
-    Estimate a tiny online state for the adaptive controller.
-
-    Returns:
-        {
-            "redundancy": float in [0, 1] approx,
-            "motion":     float in [0, 1],
-            "confidence": float in [0, 1],
-        }
-    """
-    if len(memory_meta) == 0:
-        return {"redundancy": 0.0, "motion": 0.0, "confidence": 0.5}
-
-    last_meta = memory_meta[-1]
-    prev_meta = memory_meta[-2] if len(memory_meta) >= 2 else None
-
-    if sim_mean_to_last.numel() == 0:
-        redundancy = 0.0
-    else:
-        redundancy = float(_clamp_tensor_01(sim_mean_to_last.max()).item())
-
-    # Motion: prefer the latest explicit motion metadata; otherwise derive from
-    # latest-vs-previous geometry.
-    motion = _as_float(last_meta.get("motion_mag"), default=-1.0)
-    if motion < 0.0 and prev_meta is not None:
-        motion_tensor = pairwise_motion_to_last([prev_meta], last_meta, device=device)
-        motion = float(motion_tensor[0].item()) if motion_tensor.numel() > 0 else 0.0
-    if motion < 0.0:
-        motion = 0.0
-    motion = max(0.0, min(1.0, motion))
-
-    pred_iou = _as_float(last_meta.get("pred_iou"), default=-1.0)
-    if pred_iou >= 0.0:
-        confidence = max(0.0, min(1.0, pred_iou))
-    else:
-        obj_score = last_meta.get("obj_score", None)
-        if obj_score is None:
-            confidence = 0.5
-        else:
-            obj_score = _as_float(obj_score, default=0.0)
-            confidence = float(torch.sigmoid(torch.tensor(obj_score)).item())
-            confidence = max(0.0, min(1.0, confidence))
-
-    return {
-        "redundancy": redundancy,
-        "motion": motion,
-        "confidence": confidence,
-    }
-
-
-# -------------------------
-# Controller
-# -------------------------
-
-DEFAULT_CONTROLLER_CFG: Dict[str, float] = {
-    "redundancy_high": 0.72,
-    "motion_low": 0.08,
-    "motion_high": 0.18,
-    "confidence_high": 0.72,
-    "confidence_low": 0.45,
-}
-
-POLICY_PRESETS: Dict[str, Dict[str, float]] = {
-    "conservative": {
-        "prune_delta": -1.0,
-        "motion_weight": 0.60,
-        "geometry_weight": 0.10,
-        "temporal_bonus_weight": 0.00,
-    },
-    "normal": {
-        "prune_delta": 0.0,
-        "motion_weight": 0.35,
-        "geometry_weight": 0.25,
-        "temporal_bonus_weight": 0.00,
-    },
-    "aggressive": {
-        "prune_delta": 1.0,
-        "motion_weight": 0.15,
-        "geometry_weight": 0.35,
-        "temporal_bonus_weight": 0.05,
-    },
-}
-
-
-def select_state_policy(
-    state: Dict[str, float],
-    controller_cfg: Optional[Dict[str, float]] = None,
-) -> str:
-    cfg = dict(DEFAULT_CONTROLLER_CFG)
-    if controller_cfg is not None:
-        cfg.update(controller_cfg)
-
-    r = state["redundancy"]
-    m = state["motion"]
-    c = state["confidence"]
-
-    if (c < cfg["confidence_low"]) or (m > cfg["motion_high"]):
-        return "conservative"
-    if (r > cfg["redundancy_high"]) and (m < cfg["motion_low"]) and (c > cfg["confidence_high"]):
-        return "aggressive"
-    return "normal"
-
-
-# -------------------------
-# Score computation
-# -------------------------
-
-def compute_rule_based_scores(
-    score_mode: str,
-    candidate_frames: torch.Tensor,
-    last_frame: torch.Tensor,
-    candidate_meta: Sequence[Dict[str, Any]],
-    last_meta: Dict[str, Any],
-    min_temporal_gap: int = 0,
-    motion_weight: float = 0.35,
-    geometry_weight: float = 0.25,
-    temporal_bonus_weight: float = 0.0,
-) -> Tuple[torch.Tensor, Dict[str, Any]]:
-    """
-    Larger score => more redundant => more likely to be pruned.
-    """
-    device = last_frame.device
-
-    sim_mean = cosine_similarity_to_last_mean(candidate_frames, last_frame)
-    sim_raw = cosine_similarity_to_last_raw(candidate_frames, last_frame)
-
-    motion = pairwise_motion_to_last(candidate_meta, last_meta, device=device)
-    geometry = pairwise_geometry_overlap_to_last(candidate_meta, last_meta, device=device)
-    temporal = temporal_closeness_to_last(
-        candidate_meta, last_meta, device=device, min_temporal_gap=min_temporal_gap
-    )
-
-    scores = sim_mean.clone()
-
-    if score_mode == "cosine_only":
-        scores = sim_mean
-    elif score_mode == "cosine_motion":
-        scores = sim_mean - motion_weight * motion
-    elif score_mode == "cosine_motion_geometry":
-        scores = sim_mean - motion_weight * motion + geometry_weight * geometry
-    else:
-        raise ValueError(
-            f"Unknown score_mode={score_mode!r}. Expected one of: "
-            "cosine_only | cosine_motion | cosine_motion_geometry."
+    def _extract_mask_tensor(self, frame_out: Dict[str, Any]) -> Optional[torch.Tensor]:
+        return self._extract_first_available_tensor(
+            frame_out,
+            [
+                "high_res_masks",
+                "pred_masks_high_res",
+                "high_res_pred_masks",
+                "pred_masks",
+                "low_res_masks",
+                "mask_inputs",
+            ],
         )
 
-    if temporal_bonus_weight != 0.0:
-        scores = scores + temporal_bonus_weight * temporal
+    def _mask_tensor_to_geometry(self, mask_tensor: Optional[torch.Tensor]) -> Dict[str, Any]:
+        """
+        Convert a predicted mask tensor into a small geometry summary usable by
+        memory pruning. This is lightweight and only used during inference.
 
-    debug = {
-        "score_mode": score_mode,
-        "candidate_similarities_raw": sim_raw.detach().cpu().tolist(),
-        "candidate_similarities_mean": sim_mean.detach().cpu().tolist(),
-        "candidate_motion": motion.detach().cpu().tolist(),
-        "candidate_geometry_overlap": geometry.detach().cpu().tolist(),
-        "candidate_temporal_closeness": temporal.detach().cpu().tolist(),
-        "candidate_drop_scores": scores.detach().cpu().tolist(),
-        "motion_weight": motion_weight,
-        "geometry_weight": geometry_weight,
-        "temporal_bonus_weight": temporal_bonus_weight,
-    }
-    return scores, debug
-
-
-# -------------------------
-# Selection
-# -------------------------
-
-def select_delete_indices_by_scores(
-    base_indices: List[int],
-    scores: torch.Tensor,
-    metas: Sequence[Dict[str, Any]],
-    num_to_prune: int,
-    prefer_non_cond: bool = False,
-    similarity_threshold: Optional[float] = None,
-) -> List[int]:
-    """
-    Return actual indices in `to_cat_memory` to delete.
-    Larger score => more likely to be pruned.
-    """
-    if num_to_prune <= 0 or len(base_indices) == 0:
-        return []
-
-    if similarity_threshold is not None:
-        eligible_local = [
-            i for i, score in enumerate(scores.detach().cpu().tolist())
-            if score >= similarity_threshold
-        ]
-    else:
-        eligible_local = list(range(len(base_indices)))
-
-    def rank_subset(local_ids: List[int], k: int) -> List[int]:
-        if k <= 0 or len(local_ids) == 0:
-            return []
-        subset_scores = scores[local_ids]
-        _, subset_order = torch.sort(subset_scores, descending=True)
-        chosen_local_ids = [local_ids[j] for j in subset_order[:k].tolist()]
-        return [base_indices[j] for j in chosen_local_ids]
-
-    if not prefer_non_cond:
-        chosen = rank_subset(eligible_local, min(num_to_prune, len(eligible_local)))
-        if len(chosen) < num_to_prune:
-            already = set(chosen)
-            remaining_local = [
-                i for i in range(len(base_indices))
-                if base_indices[i] not in already
-            ]
-            chosen.extend(rank_subset(remaining_local, num_to_prune - len(chosen)))
-        return chosen
-
-    non_cond_local = [
-        i for i in eligible_local if not metas[i].get("is_conditioning", False)
-    ]
-    cond_local = [
-        i for i in eligible_local if metas[i].get("is_conditioning", False)
-    ]
-
-    chosen = rank_subset(non_cond_local, min(num_to_prune, len(non_cond_local)))
-    still_need = num_to_prune - len(chosen)
-
-    if still_need > 0:
-        already = set(chosen)
-        cond_remaining = [
-            i for i in cond_local
-            if base_indices[i] not in already
-        ]
-        chosen.extend(rank_subset(cond_remaining, still_need))
-
-    if len(chosen) < num_to_prune:
-        already = set(chosen)
-        remaining_local = [
-            i for i in range(len(base_indices))
-            if base_indices[i] not in already
-        ]
-        chosen.extend(rank_subset(remaining_local, num_to_prune - len(chosen)))
-
-    return chosen
-
-
-# -------------------------
-# Main entry point
-# -------------------------
-
-def plan_memory_pruning(
-    *,
-    prune_mode: str,
-    score_mode: str,
-    to_cat_memory: Sequence[torch.Tensor],
-    memory_meta: Sequence[Dict[str, Any]],
-    num_maskmem: int,
-    num_frame_to_prune: int,
-    protect_conditioning_memories: bool = False,
-    memory_similarity_threshold: Optional[float] = None,
-    memory_min_temporal_gap: int = 0,
-    controller_cfg: Optional[Dict[str, float]] = None,
-) -> Tuple[List[int], Dict[str, Any]]:
-    """
-    Compute which indices in `to_cat_memory` should be pruned.
-
-    Returns:
-        delete_indices: actual indices in `to_cat_memory`
-        debug: detailed debug payload
-    """
-    n = len(to_cat_memory)
-    base_debug: Dict[str, Any] = {
-        "mode": prune_mode,
-        "score_mode": score_mode,
-        "num_before": n,
-        "num_after": n,
-        "pruned_indices": [],
-        "pruned_frame_idx": [],
-    }
-
-    if n <= 2:
-        return [], base_debug
-
-    if (n + num_frame_to_prune) <= num_maskmem:
-        return [], base_debug
-
-    num_candidates = n - 2
-    base_num_to_prune = min(n + num_frame_to_prune - num_maskmem, num_candidates)
-    if base_num_to_prune <= 0:
-        return [], base_debug
-
-    last_frame = to_cat_memory[-1]
-    candidate_frames = torch.stack(list(to_cat_memory[1:-1]), dim=0)
-    candidate_meta = list(memory_meta[1:-1])
-    last_meta = memory_meta[-1]
-    base_indices = list(range(1, n - 1))
-
-    if prune_mode == "efp":
-        similarities_raw = cosine_similarity_to_last_raw(candidate_frames, last_frame)
-        similarities_mean = cosine_similarity_to_last_mean(candidate_frames, last_frame)
-
-        _, sorted_indices = torch.sort(similarities_raw, descending=True)
-        delete_indices = (sorted_indices[:base_num_to_prune] + 1).tolist()
-        delete_indices = sorted(delete_indices, reverse=True)
-
-        debug = dict(base_debug)
-        debug.update(
+        Returns:
             {
-                "mode": "efp",
-                "num_to_prune": base_num_to_prune,
-                "candidate_frame_idx": [m.get("frame_idx") for m in candidate_meta],
-                "candidate_is_conditioning": [m.get("is_conditioning") for m in candidate_meta],
-                "candidate_similarities_raw": similarities_raw.detach().cpu().tolist(),
-                "candidate_similarities_mean": similarities_mean.detach().cpu().tolist(),
+                "centroid_xy": (x, y) normalized to [0,1],
+                "area_ratio": float in [0,1],
+                "bbox_xyxy": (x1, y1, x2, y2) normalized to [0,1],
             }
-        )
-        return delete_indices, debug
+        """
+        if mask_tensor is None:
+            return {
+                "centroid_xy": None,
+                "area_ratio": None,
+                "bbox_xyxy": None,
+            }
 
-    if prune_mode not in {"rule_based", "state_aware"}:
-        raise ValueError(
-            f"Unknown prune_mode={prune_mode!r}. Expected one of: "
-            "efp | rule_based | state_aware."
-        )
+        mask = mask_tensor.detach().float()
 
-    # Rule-based baseline weights.
-    policy_name = "normal"
-    motion_weight = 0.35
-    geometry_weight = 0.25
-    temporal_bonus_weight = 0.0
-    num_to_prune = base_num_to_prune
+        # Accept [B,1,H,W], [B,H,W], [1,H,W], or [H,W].
+        if mask.ndim == 4:
+            mask = mask[:, 0]
+        elif mask.ndim == 3:
+            pass
+        elif mask.ndim == 2:
+            mask = mask.unsqueeze(0)
+        else:
+            return {
+                "centroid_xy": None,
+                "area_ratio": None,
+                "bbox_xyxy": None,
+            }
 
-    if prune_mode == "state_aware":
-        sim_mean = cosine_similarity_to_last_mean(candidate_frames, last_frame)
-        state = estimate_online_state(sim_mean_to_last=sim_mean, memory_meta=memory_meta, device=last_frame.device)
-        policy_name = select_state_policy(state, controller_cfg=controller_cfg)
-        preset = POLICY_PRESETS[policy_name]
+        # Convert logits -> binary mask, or probabilities -> binary mask.
+        if mask.min().item() < 0.0 or mask.max().item() > 1.0:
+            bin_mask = mask > 0.0
+        else:
+            bin_mask = mask > 0.5
 
-        num_to_prune = int(base_num_to_prune + preset["prune_delta"])
-        num_to_prune = max(1, min(num_to_prune, num_candidates))
+        B, H, W = bin_mask.shape
+        centroids_x: List[float] = []
+        centroids_y: List[float] = []
+        areas: List[float] = []
+        boxes: List[List[float]] = []
 
-        motion_weight = float(preset["motion_weight"])
-        geometry_weight = float(preset["geometry_weight"])
-        temporal_bonus_weight = float(preset["temporal_bonus_weight"])
-    else:
-        state = None
+        ys = torch.arange(H, device=bin_mask.device, dtype=torch.float32)
+        xs = torch.arange(W, device=bin_mask.device, dtype=torch.float32)
 
-    scores, score_debug = compute_rule_based_scores(
-        score_mode=score_mode,
-        candidate_frames=candidate_frames,
-        last_frame=last_frame,
-        candidate_meta=candidate_meta,
-        last_meta=last_meta,
-        min_temporal_gap=memory_min_temporal_gap,
-        motion_weight=motion_weight,
-        geometry_weight=geometry_weight,
-        temporal_bonus_weight=temporal_bonus_weight,
-    )
+        for b in range(B):
+            m = bin_mask[b]
+            area = float(m.float().mean().item())
+            if area <= 0.0:
+                continue
 
-    delete_indices = select_delete_indices_by_scores(
-        base_indices=base_indices,
-        scores=scores,
-        metas=candidate_meta,
-        num_to_prune=num_to_prune,
-        prefer_non_cond=protect_conditioning_memories,
-        similarity_threshold=memory_similarity_threshold,
-    )
-    delete_indices = sorted(delete_indices, reverse=True)
+            proj_y = m.float().sum(dim=1)
+            proj_x = m.float().sum(dim=0)
 
-    debug = dict(base_debug)
-    debug.update(
-        {
-            "mode": prune_mode,
-            "policy_name": policy_name,
-            "num_to_prune": num_to_prune,
-            "base_num_to_prune": base_num_to_prune,
-            "candidate_frame_idx": [m.get("frame_idx") for m in candidate_meta],
-            "candidate_is_conditioning": [m.get("is_conditioning") for m in candidate_meta],
-            "state": state,
+            y_idx = torch.where(proj_y > 0)[0]
+            x_idx = torch.where(proj_x > 0)[0]
+            if y_idx.numel() == 0 or x_idx.numel() == 0:
+                continue
+
+            mass = m.float().sum().clamp(min=1.0)
+            cy = float((m.float().sum(dim=1) * ys).sum().item() / mass.item())
+            cx = float((m.float().sum(dim=0) * xs).sum().item() / mass.item())
+
+            y1 = float(y_idx[0].item())
+            y2 = float(y_idx[-1].item())
+            x1 = float(x_idx[0].item())
+            x2 = float(x_idx[-1].item())
+
+            centroids_x.append(cx / max(1.0, W - 1.0))
+            centroids_y.append(cy / max(1.0, H - 1.0))
+            areas.append(area)
+            boxes.append(
+                [
+                    x1 / max(1.0, W - 1.0),
+                    y1 / max(1.0, H - 1.0),
+                    x2 / max(1.0, W - 1.0),
+                    y2 / max(1.0, H - 1.0),
+                ]
+            )
+
+        if len(areas) == 0:
+            return {
+                "centroid_xy": None,
+                "area_ratio": 0.0,
+                "bbox_xyxy": None,
+            }
+
+        mean_box = [sum(coords[i] for coords in boxes) / len(boxes) for i in range(4)]
+        return {
+            "centroid_xy": (
+                sum(centroids_x) / len(centroids_x),
+                sum(centroids_y) / len(centroids_y),
+            ),
+            "area_ratio": sum(areas) / len(areas),
+            "bbox_xyxy": tuple(mean_box),
         }
-    )
-    debug.update(score_debug)
-    return delete_indices, debug
+
+    def _extract_confidence_metadata(self, frame_out: Dict[str, Any]) -> Dict[str, Any]:
+        pred_iou = None
+        obj_score = None
+
+        # IoU prediction from SAM-style decoder output
+        for key in ["best_iou", "pred_iou", "iou_scores"]:
+            value = frame_out.get(key, None)
+            if value is not None:
+                if isinstance(value, torch.Tensor):
+                    pred_iou = float(value.detach().float().mean().item())
+                else:
+                    pred_iou = float(value)
+                break
+
+        # Common case: "ious" with shape [B, M]
+        if pred_iou is None:
+            ious = frame_out.get("ious", None)
+            if isinstance(ious, torch.Tensor) and ious.numel() > 0:
+                if ious.ndim >= 2:
+                    ious = ious.max(dim=-1).values
+                pred_iou = float(ious.detach().float().mean().item())
+
+        # Objectness / presence confidence
+        for key in ["object_score_logits", "object_scores", "obj_score"]:
+            value = frame_out.get(key, None)
+            if value is not None:
+                if isinstance(value, torch.Tensor):
+                    obj_score = float(value.detach().float().mean().item())
+                else:
+                    obj_score = float(value)
+                break
+
+        return {
+            "pred_iou": pred_iou,
+            "obj_score": obj_score,
+        }
+
+    def _make_memory_meta(
+        self,
+        frame_idx: Optional[int],
+        t_pos: int,
+        is_conditioning: bool,
+        source: str,
+        prev: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        meta: Dict[str, Any] = {
+            "frame_idx": frame_idx,
+            "t_pos": t_pos,
+            "is_conditioning": is_conditioning,
+            "source": source,
+        }
+
+        if prev is None:
+            return meta
+
+        # If another part of the pipeline already wrote explicit pruning metadata,
+        # use it directly.
+        cached_meta = prev.get("memory_prune_meta", None)
+        if isinstance(cached_meta, dict):
+            meta.update(cached_meta)
+            return meta
+
+        # Otherwise derive a lightweight summary from available mask / score outputs.
+        mask_tensor = self._extract_mask_tensor(prev)
+        meta.update(self._mask_tensor_to_geometry(mask_tensor))
+        meta.update(self._extract_confidence_metadata(prev))
+
+        # Optional pre-computed motion magnitude, if caller stored one.
+        if "motion_mag" in prev:
+            motion_mag = prev["motion_mag"]
+            if isinstance(motion_mag, torch.Tensor):
+                meta["motion_mag"] = float(motion_mag.detach().float().mean().item())
+            else:
+                meta["motion_mag"] = float(motion_mag)
+
+        return meta
+
+    # ---------------------------------------------------------------------
+    # Pruning
+    # ---------------------------------------------------------------------
+
+    def _prune_memory_frames(
+        self,
+        to_cat_memory: List[torch.Tensor],
+        to_cat_memory_pos_embed: List[torch.Tensor],
+        memory_meta: List[Dict[str, Any]],
+    ) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[Dict[str, Any]]]:
+        if self.training:
+            self._last_memory_prune_debug = {
+                "mode": self.memory_prune_mode,
+                "skipped": "training",
+                "num_before": len(to_cat_memory),
+                "num_after": len(to_cat_memory),
+            }
+            return to_cat_memory, to_cat_memory_pos_embed, memory_meta
+
+        if self.memory_prune_mode == "off":
+            self._last_memory_prune_debug = {
+                "mode": "off",
+                "score_mode": self.memory_score_mode,
+                "num_before": len(to_cat_memory),
+                "num_after": len(to_cat_memory),
+                "pruned_indices": [],
+                "pruned_frame_idx": [],
+            }
+            return to_cat_memory, to_cat_memory_pos_embed, memory_meta
+
+        delete_indices, debug = plan_memory_pruning(
+            prune_mode=self.memory_prune_mode,
+            score_mode=self.memory_score_mode,
+            to_cat_memory=to_cat_memory,
+            memory_meta=memory_meta,
+            num_maskmem=self.num_maskmem,
+            num_frame_to_prune=self.num_frame_to_prune,
+            protect_conditioning_memories=self.protect_conditioning_memories,
+            memory_similarity_threshold=self.memory_similarity_threshold,
+            memory_min_temporal_gap=self.memory_min_temporal_gap,
+            controller_cfg=self.state_controller_cfg,
+        )
+
+        pruned_frame_idx = [memory_meta[i].get("frame_idx") for i in delete_indices]
+        for i in delete_indices:
+            to_cat_memory.pop(i)
+            to_cat_memory_pos_embed.pop(i)
+            memory_meta.pop(i)
+
+        debug["num_after"] = len(to_cat_memory)
+        debug["pruned_indices"] = delete_indices
+        debug["pruned_frame_idx"] = pruned_frame_idx
+
+        if not self.debug_memory_pruning:
+            # Keep debug compact unless explicitly requested.
+            debug = {
+                "mode": debug.get("mode"),
+                "score_mode": debug.get("score_mode"),
+                "policy_name": debug.get("policy_name", None),
+                "state": debug.get("state", None),
+                "num_before": debug.get("num_before"),
+                "num_after": debug.get("num_after"),
+                "num_to_prune": debug.get("num_to_prune", 0),
+                "pruned_indices": debug.get("pruned_indices", []),
+                "pruned_frame_idx": debug.get("pruned_frame_idx", []),
+            }
+
+        self._last_memory_prune_debug = debug
+        return to_cat_memory, to_cat_memory_pos_embed, memory_meta
+
+    # ---------------------------------------------------------------------
+    # Main override: only minimally changes the memory-collection section,
+    # while keeping the object-pointer logic and attention call unchanged.
+    # ---------------------------------------------------------------------
+
+    def _prepare_memory_conditioned_features(
+        self,
+        frame_idx,
+        is_init_cond_frame,
+        current_vision_feats,
+        current_vision_pos_embeds,
+        feat_sizes,
+        output_dict,
+        num_frames,
+        track_in_reverse=False,
+    ):
+        """Fuse the current frame's visual feature map with previous memory."""
+        B = current_vision_feats[-1].size(1)
+        C = self.hidden_dim
+        H, W = feat_sizes[-1]
+        device = current_vision_feats[-1].device
+
+        if self.num_maskmem == 0:
+            pix_feat = current_vision_feats[-1].permute(1, 2, 0).view(B, C, H, W)
+            return pix_feat
+
+        num_obj_ptr_tokens = 0
+        tpos_sign_mul = -1 if track_in_reverse else 1
+
+        if not is_init_cond_frame:
+            to_cat_memory, to_cat_memory_pos_embed, memory_meta = [], [], []
+
+            assert len(output_dict["cond_frame_outputs"]) > 0
+            cond_outputs = output_dict["cond_frame_outputs"]
+            selected_cond_outputs, unselected_cond_outputs = select_closest_cond_frames(
+                frame_idx, cond_outputs, self.max_cond_frames_in_attn
+            )
+
+            # Track richer metadata so prune policies can be role-aware.
+            t_pos_and_prevs: List[Tuple[int, Optional[int], Optional[Dict[str, Any]], bool, str]] = [
+                (0, t, out, True, "cond")
+                for t, out in selected_cond_outputs.items()
+            ]
+
+            stride = 1 if self.training else self.memory_temporal_stride_for_eval
+            for t_pos in range(1, self.num_maskmem):
+                t_rel = self.num_maskmem - t_pos
+                if t_rel == 1:
+                    if not track_in_reverse:
+                        prev_frame_idx = frame_idx - t_rel
+                    else:
+                        prev_frame_idx = frame_idx + t_rel
+                else:
+                    if not track_in_reverse:
+                        prev_frame_idx = ((frame_idx - 2) // stride) * stride
+                        prev_frame_idx = prev_frame_idx - (t_rel - 2) * stride
+                    else:
+                        prev_frame_idx = -(-(frame_idx + 2) // stride) * stride
+                        prev_frame_idx = prev_frame_idx + (t_rel - 2) * stride
+
+                prev = output_dict["non_cond_frame_outputs"].get(prev_frame_idx, None)
+                is_conditioning = False
+                source = "non_cond"
+                if prev is None:
+                    prev = unselected_cond_outputs.get(prev_frame_idx, None)
+                    if prev is not None:
+                        is_conditioning = True
+                        source = "cond_unselected"
+
+                t_pos_and_prevs.append(
+                    (t_pos, prev_frame_idx, prev, is_conditioning, source)
+                )
+
+            for t_pos, prev_frame_idx, prev, is_conditioning, source in t_pos_and_prevs:
+                if prev is None:
+                    continue
+
+                feats = prev["maskmem_features"].to(device, non_blocking=True)
+                to_cat_memory.append(feats.flatten(2).permute(2, 0, 1))
+
+                maskmem_enc = prev["maskmem_pos_enc"][-1].to(device)
+                maskmem_enc = maskmem_enc.flatten(2).permute(2, 0, 1)
+                maskmem_enc = (
+                    maskmem_enc + self.maskmem_tpos_enc[self.num_maskmem - t_pos - 1]
+                )
+                to_cat_memory_pos_embed.append(maskmem_enc)
+
+                memory_meta.append(
+                    self._make_memory_meta(
+                        frame_idx=prev_frame_idx,
+                        t_pos=t_pos,
+                        is_conditioning=is_conditioning,
+                        source=source,
+                        prev=prev,
+                    )
+                )
+
+            # Prune only frame memories. Keep object-pointer logic below unchanged.
+            to_cat_memory, to_cat_memory_pos_embed, memory_meta = self._prune_memory_frames(
+                to_cat_memory=to_cat_memory,
+                to_cat_memory_pos_embed=to_cat_memory_pos_embed,
+                memory_meta=memory_meta,
+            )
+
+            # Object pointers: keep the upstream logic unchanged.
+            if self.use_obj_ptrs_in_encoder:
+                max_obj_ptrs_in_encoder = min(num_frames, self.max_obj_ptrs_in_encoder)
+                if not self.training and self.only_obj_ptrs_in_the_past_for_eval:
+                    ptr_cond_outputs = {
+                        t: out
+                        for t, out in selected_cond_outputs.items()
+                        if (t >= frame_idx if track_in_reverse else t <= frame_idx)
+                    }
+                else:
+                    ptr_cond_outputs = selected_cond_outputs
+
+                pos_and_ptrs = [
+                    (
+                        (
+                            (frame_idx - t) * tpos_sign_mul
+                            if self.use_signed_tpos_enc_to_obj_ptrs
+                            else abs(frame_idx - t)
+                        ),
+                        out["obj_ptr"],
+                    )
+                    for t, out in ptr_cond_outputs.items()
+                ]
+
+                for t_diff in range(1, max_obj_ptrs_in_encoder):
+                    t = frame_idx + t_diff if track_in_reverse else frame_idx - t_diff
+                    if t < 0 or (num_frames is not None and t >= num_frames):
+                        break
+                    out = output_dict["non_cond_frame_outputs"].get(
+                        t, unselected_cond_outputs.get(t, None)
+                    )
+                    if out is not None:
+                        pos_and_ptrs.append((t_diff, out["obj_ptr"]))
+
+                if len(pos_and_ptrs) > 0:
+                    pos_list, ptrs_list = zip(*pos_and_ptrs)
+                    obj_ptrs = torch.stack(ptrs_list, dim=0)
+
+                    if self.add_tpos_enc_to_obj_ptrs:
+                        t_diff_max = max_obj_ptrs_in_encoder - 1
+                        tpos_dim = C if self.proj_tpos_enc_in_obj_ptrs else self.mem_dim
+                        obj_pos = torch.tensor(pos_list).to(device=device, non_blocking=True)
+                        obj_pos = get_1d_sine_pe(obj_pos / t_diff_max, dim=tpos_dim)
+                        obj_pos = self.obj_ptr_tpos_proj(obj_pos)
+                        obj_pos = obj_pos.unsqueeze(1).expand(-1, B, self.mem_dim)
+                    else:
+                        obj_pos = obj_ptrs.new_zeros(len(pos_list), B, self.mem_dim)
+
+                    if self.mem_dim < C:
+                        obj_ptrs = obj_ptrs.reshape(-1, B, C // self.mem_dim, self.mem_dim)
+                        obj_ptrs = obj_ptrs.permute(0, 2, 1, 3).flatten(0, 1)
+                        obj_pos = obj_pos.repeat_interleave(C // self.mem_dim, dim=0)
+
+                    to_cat_memory.append(obj_ptrs)
+                    to_cat_memory_pos_embed.append(obj_pos)
+                    num_obj_ptr_tokens = obj_ptrs.shape[0]
+                else:
+                    num_obj_ptr_tokens = 0
+
+        else:
+            if self.directly_add_no_mem_embed:
+                pix_feat_with_mem = current_vision_feats[-1] + self.no_mem_embed
+                pix_feat_with_mem = pix_feat_with_mem.permute(1, 2, 0).view(B, C, H, W)
+                return pix_feat_with_mem
+
+            to_cat_memory = [self.no_mem_embed.expand(1, B, self.mem_dim)]
+            to_cat_memory_pos_embed = [self.no_mem_pos_enc.expand(1, B, self.mem_dim)]
+
+        memory = torch.cat(to_cat_memory, dim=0)
+        memory_pos_embed = torch.cat(to_cat_memory_pos_embed, dim=0)
+
+        pix_feat_with_mem = self.memory_attention(
+            curr=current_vision_feats,
+            curr_pos=current_vision_pos_embeds,
+            memory=memory,
+            memory_pos=memory_pos_embed,
+            num_obj_ptr_tokens=num_obj_ptr_tokens,
+        )
+        pix_feat_with_mem = pix_feat_with_mem.permute(1, 2, 0).view(B, C, H, W)
+        return pix_feat_with_mem
+
