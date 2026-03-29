@@ -882,7 +882,7 @@ class SAM2Base(torch.nn.Module):
         (
             _,
             _,
-            _,
+            #_,
             ious,
             low_res_masks,
             high_res_masks,
