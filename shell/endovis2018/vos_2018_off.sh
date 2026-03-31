@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=vos_2018_off
-#SBATCH --output=/home/e/e0968951/fyp/Surgical-SAM-2/endovis2018/logs/vos_2018_off_%j.out
-#SBATCH --error=/home/e/e0968951/fyp/Surgical-SAM-2/endovis2018/logs/vos_2018_off_%j.err
+#SBATCH --output=/home/e/e0968951/fyp/Surgical-SAM-2/shell/endovis2018/logs/vos_2018_off_%j.out
+#SBATCH --error=/home/e/e0968951/fyp/Surgical-SAM-2/shell/endovis2018/logs/vos_2018_off_%j.err
 #SBATCH --time=03:00:00           
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=256G                
