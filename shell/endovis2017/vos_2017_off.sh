@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=vos_2017_off
-#SBATCH --output=/home/e/e0968951/fyp/Surgical-SAM-2/shell/logs/vos_2017_off_%j.out
-#SBATCH --error=/home/e/e0968951/fyp/Surgical-SAM-2/shell/logs/vos_2017_off_%j.err
+#SBATCH --output=/home/e/e0968951/fyp/Surgical-SAM-2/endovis2017/logs/vos_2017_off_%j.out
+#SBATCH --error=/home/e/e0968951/fyp/Surgical-SAM-2/endovis2017/logs/vos_2017_off_%j.err
 #SBATCH --time=03:00:00           # 建议和你salloc的时间保持一致
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=256G                # 对应你salloc中的256G
@@ -22,27 +22,14 @@ export PYTHONPATH=/home/e/e0968951/fyp/Surgical-SAM-2:$PYTHONPATH
 
 mkdir -p /home/e/e0968951/fyp/Surgical-SAM-2/results/vos_2017_off
 
-
-
-#/home/e/e0968951/fyp/fyp_env/bin/python tools/vos_inference.py \
-#  --sam2_cfg configs/sam2.1/sam2.1_hiera_s.yaml \
-#  --sam2_checkpoint ./checkpoints/sam2.1_hiera_s_endo18.pth \
-#  --output_mask_dir ./results/debug_seq2_off \
-#  --input_mask_dir ./dataset/endovis18_debug/train/VOS/Annotations_vos_instrument \
-#  --base_video_dir ./dataset/endovis18_debug/train/JPEGImages \
-#  --gt_root ./dataset/endovis18_debug/train/Annotations \
-#  --gpu_id 0 \
-#  --video_list_file ./one_video.txt
-
-
 /home/e/e0968951/fyp/fyp_env/bin/python tools/vos_inference.py \
   --sam2_cfg configs/sam2.1/sam2.1_hiera_s.yaml \
   --sam2_checkpoint ./checkpoints/sam2.1_hiera_s_endo18.pth \
   --output_mask_dir ./results/vos_2017_off \
-  --input_mask_dir ./dataset/endovis2017_reorganized/VOS/Annotations_vos_instrument \
-  --base_video_dir ./dataset/endovis2017_reorganized/JPEGImages \
-  --gt_root ./dataset/endovis2017_reorganized/Annotations \
+  --input_mask_dir ./dataset/VOS-Endovis17/valid/VOS/Annotations_vos_instrument \
+  --base_video_dir ./dataset/VOS-Endovis17/valid/JPEGImages \
+  --gt_root ./dataset/VOS-Endovis17/valid/Annotations \
   --gpu_id 0 \
-  --video_list_file ./2017.txt \
+  --video_list_file ./video_txt/2017_val.txt \
   --memory_prune_mode off \
   --num_frame_to_prune 0
