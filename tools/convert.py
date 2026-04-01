@@ -1,57 +1,57 @@
+from pathlib import Path
 from PIL import Image
-import numpy as np
-import matplotlib.pyplot as plt
 
-img_path = r"E:\dataset\VOS-Endovis17\VOS-Endovis17\train\JPEGImages\seq_1\00120.png"
-mask_path = r"E:\dataset\VOS-Endovis17\VOS-Endovis17\train\Annotations\seq_1\00120.png"
+# ========= 改这里 =========
+root_dir = Path(r"/home/e/e0968951/fyp/Surgical-SAM-2/dataset/VOS-Endovis17")
+target_h = 1024
+target_w = 1280
+overwrite = True   # True = 直接覆盖原图；False = 另存为 *_cropped.png
+# =========================
 
-# load image
-img = Image.open(img_path).convert("RGB")
-img_np = np.array(img)
+valid_exts = {".png", ".jpg", ".jpeg", ".JPG", ".JPEG", ".PNG"}
 
-# load mask
-mask = Image.open(mask_path)
-mask_np = np.array(mask)
+def center_crop_image(img, target_h, target_w):
+    w, h = img.size  # PIL: (W, H)
 
-print("original image shape:", img_np.shape)
-print("mask shape:", mask_np.shape)
+    if h < target_h or w < target_w:
+        raise ValueError(f"image too small: {(h, w)} < {(target_h, target_w)}")
 
-target_h, target_w = mask_np.shape[:2]
+    left = (w - target_w) // 2
+    top = (h - target_h) // 2
+    right = left + target_w
+    bottom = top + target_h
 
-H, W = img_np.shape[:2]
-start_y = (H - target_h) // 2
-start_x = (W - target_w) // 2
-end_y = start_y + target_h
-end_x = start_x + target_w
+    return img.crop((left, top, right, bottom))
 
-cropped_img = img_np[start_y:end_y, start_x:end_x]
+count = 0
 
-print("center crop box:", (start_x, start_y, end_x, end_y))
-print("cropped image shape:", cropped_img.shape)
+for jpeg_dir in root_dir.rglob("JPEGImages"):
+    if not jpeg_dir.is_dir():
+        continue
 
-# overlay
-overlay = cropped_img.copy()
-alpha = 0.45
-red = np.array([255, 0, 0], dtype=np.uint8)
+    print(f"\n[PROCESS JPEGImages DIR] {jpeg_dir}")
 
-fg = mask_np > 0
-overlay[fg] = ((1 - alpha) * overlay[fg] + alpha * red).astype(np.uint8)
+    for img_path in jpeg_dir.rglob("*"):
+        if not img_path.is_file():
+            continue
+        if img_path.suffix not in valid_exts:
+            continue
 
-plt.figure(figsize=(18, 6))
+        try:
+            img = Image.open(img_path).convert("RGB")
+            cropped = center_crop_image(img, target_h, target_w)
 
-plt.subplot(1, 3, 1)
-plt.imshow(cropped_img)
-plt.title("Center-cropped image")
-plt.axis("off")
+            if overwrite:
+                cropped.save(img_path)
+                print(f"overwritten: {img_path}")
+            else:
+                new_path = img_path.with_name(img_path.stem + "_cropped" + img_path.suffix)
+                cropped.save(new_path)
+                print(f"saved: {new_path}")
 
-plt.subplot(1, 3, 2)
-plt.imshow(mask_np, cmap="gray")
-plt.title("Mask")
-plt.axis("off")
+            count += 1
 
-plt.subplot(1, 3, 3)
-plt.imshow(overlay)
-plt.title("Overlay")
-plt.axis("off")
+        except Exception as e:
+            print(f"[SKIP] {img_path} -> {e}")
 
-plt.show()
+print(f"\nDone. Total processed images: {count}")
