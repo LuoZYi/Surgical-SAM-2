@@ -19,7 +19,7 @@ results/*
 
 *.pth
 *.pt
-
+*.out
 *.err
 *.log
 
