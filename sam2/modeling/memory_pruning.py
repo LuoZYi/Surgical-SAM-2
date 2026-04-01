@@ -25,8 +25,14 @@ Design notes
                   + optional temporal closeness bonus
 
 3) `state_aware` keeps the same score family, but adapts pruning aggressiveness
-   and score weights online from a light-weight state:
-      s_t = [redundancy, motion_change, confidence]
+   and score weights online from a light-weight state. In v2, the state is a
+   richer summary of the current memory bank:
+      s_t = [redundancy_max, redundancy_mean, motion, confidence,
+             geometry_stability, memory_pressure, temporal_density]
+
+4) IMPORTANT: state-aware pruning never under-prunes relative to the minimum
+   budget required by `num_maskmem`. It can prune the minimum amount or more,
+   but not less. The true "no pruning" baseline should use `prune_mode="off"`.
 
 All functions are inference-safe and gracefully fall back if some metadata
 (e.g. masks / IoU / object score) is unavailable.
@@ -87,6 +93,10 @@ def _clamp_tensor_01(x: torch.Tensor) -> torch.Tensor:
     return torch.clamp(x, 0.0, 1.0)
 
 
+def _clamp_float_01(x: float) -> float:
+    return max(0.0, min(1.0, float(x)))
+
+
 def _bbox_iou_xyxy(
     box1: Optional[Tuple[float, float, float, float]],
     box2: Optional[Tuple[float, float, float, float]],
@@ -141,6 +151,7 @@ def cosine_similarity_to_last_raw(
     return similarities
 
 
+
 def cosine_similarity_to_last_mean(
     candidate_frames: torch.Tensor,
     last_frame: torch.Tensor,
@@ -193,6 +204,7 @@ def temporal_closeness_to_last(
     return torch.tensor(scores, device=device, dtype=torch.float32)
 
 
+
 def pairwise_motion_to_last(
     candidate_meta: Sequence[Dict[str, Any]],
     last_meta: Dict[str, Any],
@@ -226,6 +238,7 @@ def pairwise_motion_to_last(
     return torch.tensor(vals, device=device, dtype=torch.float32)
 
 
+
 def pairwise_geometry_overlap_to_last(
     candidate_meta: Sequence[Dict[str, Any]],
     last_meta: Dict[str, Any],
@@ -253,31 +266,69 @@ def pairwise_geometry_overlap_to_last(
     return torch.tensor(vals, device=device, dtype=torch.float32)
 
 
+
+def latest_geometry_stability(
+    prev_meta: Optional[Dict[str, Any]],
+    last_meta: Dict[str, Any],
+) -> float:
+    """
+    Higher => latest geometry is stable relative to the previous memory.
+    Uses bbox IoU and area similarity between the latest and previous memories.
+    """
+    if prev_meta is None:
+        return 0.5  # neutral fallback
+
+    prev_box = _as_box(prev_meta.get("bbox_xyxy"))
+    last_box = _as_box(last_meta.get("bbox_xyxy"))
+    bbox_iou = _bbox_iou_xyxy(prev_box, last_box)
+
+    prev_area = _as_float(prev_meta.get("area_ratio"), default=0.0)
+    last_area = _as_float(last_meta.get("area_ratio"), default=0.0)
+    area_similarity = max(0.0, 1.0 - abs(prev_area - last_area))
+
+    return _clamp_float_01(0.7 * bbox_iou + 0.3 * area_similarity)
+
+
+
 def estimate_online_state(
     sim_mean_to_last: torch.Tensor,
     memory_meta: Sequence[Dict[str, Any]],
     device: torch.device,
+    num_maskmem: Optional[int] = None,
+    min_temporal_gap: int = 0,
 ) -> Dict[str, float]:
     """
-    Estimate a tiny online state for the adaptive controller.
+    Estimate a richer online state for the adaptive controller.
 
-    Returns:
-        {
-            "redundancy": float in [0, 1] approx,
-            "motion":     float in [0, 1],
-            "confidence": float in [0, 1],
-        }
+    Returns a backward-compatible dict that still contains the original keys:
+        redundancy, motion, confidence
+
+    and adds:
+        redundancy_max, redundancy_mean, geometry_stability,
+        memory_pressure, temporal_density
     """
     if len(memory_meta) == 0:
-        return {"redundancy": 0.0, "motion": 0.0, "confidence": 0.5}
+        return {
+            "redundancy": 0.0,
+            "redundancy_max": 0.0,
+            "redundancy_mean": 0.0,
+            "motion": 0.0,
+            "confidence": 0.5,
+            "geometry_stability": 0.5,
+            "memory_pressure": 0.0,
+            "temporal_density": 0.0,
+        }
 
     last_meta = memory_meta[-1]
     prev_meta = memory_meta[-2] if len(memory_meta) >= 2 else None
+    candidate_meta = list(memory_meta[1:-1]) if len(memory_meta) >= 3 else []
 
     if sim_mean_to_last.numel() == 0:
-        redundancy = 0.0
+        redundancy_max = 0.0
+        redundancy_mean = 0.0
     else:
-        redundancy = float(_clamp_tensor_01(sim_mean_to_last.max()).item())
+        redundancy_max = float(_clamp_tensor_01(sim_mean_to_last.max()).item())
+        redundancy_mean = float(_clamp_tensor_01(sim_mean_to_last.mean()).item())
 
     # Motion: prefer the latest explicit motion metadata; otherwise derive from
     # latest-vs-previous geometry.
@@ -287,11 +338,11 @@ def estimate_online_state(
         motion = float(motion_tensor[0].item()) if motion_tensor.numel() > 0 else 0.0
     if motion < 0.0:
         motion = 0.0
-    motion = max(0.0, min(1.0, motion))
+    motion = _clamp_float_01(motion)
 
     pred_iou = _as_float(last_meta.get("pred_iou"), default=-1.0)
     if pred_iou >= 0.0:
-        confidence = max(0.0, min(1.0, pred_iou))
+        confidence = _clamp_float_01(pred_iou)
     else:
         obj_score = last_meta.get("obj_score", None)
         if obj_score is None:
@@ -299,12 +350,38 @@ def estimate_online_state(
         else:
             obj_score = _as_float(obj_score, default=0.0)
             confidence = float(torch.sigmoid(torch.tensor(obj_score)).item())
-            confidence = max(0.0, min(1.0, confidence))
+            confidence = _clamp_float_01(confidence)
+
+    geometry_stability = latest_geometry_stability(prev_meta, last_meta)
+
+    if num_maskmem is None or num_maskmem <= 0:
+        memory_pressure = 0.0
+    else:
+        # Keep this roughly in [0, 1.5] so thresholding remains intuitive.
+        memory_pressure = min(1.5, float(len(memory_meta)) / float(num_maskmem))
+
+    temporal = temporal_closeness_to_last(
+        candidate_meta=candidate_meta,
+        last_meta=last_meta,
+        device=device,
+        min_temporal_gap=min_temporal_gap,
+    )
+    if temporal.numel() == 0:
+        temporal_density = 0.0
+    else:
+        # Raw closeness is already roughly [0, 1] for ordinary gaps.
+        temporal_density = _clamp_float_01(float(temporal.mean().item()))
 
     return {
-        "redundancy": redundancy,
+        # backward-compatible alias
+        "redundancy": redundancy_max,
+        "redundancy_max": redundancy_max,
+        "redundancy_mean": redundancy_mean,
         "motion": motion,
         "confidence": confidence,
+        "geometry_stability": geometry_stability,
+        "memory_pressure": memory_pressure,
+        "temporal_density": temporal_density,
     }
 
 
@@ -314,15 +391,21 @@ def estimate_online_state(
 
 DEFAULT_CONTROLLER_CFG: Dict[str, float] = {
     "redundancy_high": 0.72,
+    "redundancy_mean_high": 0.58,
     "motion_low": 0.08,
     "motion_high": 0.18,
     "confidence_high": 0.72,
     "confidence_low": 0.45,
+    "geometry_stability_high": 0.72,
+    "memory_pressure_high": 0.95,
+    "temporal_density_high": 0.35,
 }
 
 POLICY_PRESETS: Dict[str, Dict[str, float]] = {
     "conservative": {
-        "prune_delta": -1.0,
+        # NOTE: this is interpreted as EXTRA prune beyond the minimum budget.
+        # Conservative still respects the minimum required prune amount.
+        "prune_delta": 0.0,
         "motion_weight": 0.60,
         "geometry_weight": 0.10,
         "temporal_bonus_weight": 0.00,
@@ -342,6 +425,7 @@ POLICY_PRESETS: Dict[str, Dict[str, float]] = {
 }
 
 
+
 def select_state_policy(
     state: Dict[str, float],
     controller_cfg: Optional[Dict[str, float]] = None,
@@ -350,14 +434,39 @@ def select_state_policy(
     if controller_cfg is not None:
         cfg.update(controller_cfg)
 
-    r = state["redundancy"]
-    m = state["motion"]
-    c = state["confidence"]
+    r_max = state.get("redundancy_max", state.get("redundancy", 0.0))
+    r_mean = state.get("redundancy_mean", r_max)
+    m = state.get("motion", 0.0)
+    c = state.get("confidence", 0.5)
+    g = state.get("geometry_stability", 0.5)
+    p = state.get("memory_pressure", 0.0)
+    t = state.get("temporal_density", 0.0)
 
+    # 1) Uncertain or rapidly changing scene => protect diversity.
     if (c < cfg["confidence_low"]) or (m > cfg["motion_high"]):
         return "conservative"
-    if (r > cfg["redundancy_high"]) and (m < cfg["motion_low"]) and (c > cfg["confidence_high"]):
+
+    # 2) Clearly redundant, stable, and under real memory pressure => prune harder.
+    if (
+        (r_max > cfg["redundancy_high"])
+        and (r_mean > cfg["redundancy_mean_high"])
+        and (g > cfg["geometry_stability_high"])
+        and (p > cfg["memory_pressure_high"])
+        and (c > cfg["confidence_high"])
+        and (m < cfg["motion_low"])
+    ):
         return "aggressive"
+
+    # 3) Even if redundancy stats are not extreme, dense recent memories under
+    # pressure can still justify stronger pruning.
+    if (
+        (t > cfg["temporal_density_high"])
+        and (p > cfg["memory_pressure_high"])
+        and (c > cfg["confidence_low"])
+        and (m < cfg["motion_high"])
+    ):
+        return "aggressive"
+
     return "normal"
 
 
@@ -389,8 +498,6 @@ def compute_rule_based_scores(
     temporal = temporal_closeness_to_last(
         candidate_meta, last_meta, device=device, min_temporal_gap=min_temporal_gap
     )
-
-    scores = sim_mean.clone()
 
     if score_mode == "cosine_only":
         scores = sim_mean
@@ -531,11 +638,25 @@ def plan_memory_pruning(
         "pruned_frame_idx": [],
     }
 
+    if prune_mode == "off":
+        debug = dict(base_debug)
+        debug.update({
+            "mode": "off",
+            "num_to_prune": 0,
+            "skipped_reason": "off_baseline",
+        })
+        return [], debug
+
     if n <= 2:
         return [], base_debug
 
     if (n + num_frame_to_prune) <= num_maskmem:
-        return [], base_debug
+        debug = dict(base_debug)
+        debug.update({
+            "num_to_prune": 0,
+            "skipped_reason": "within_budget",
+        })
+        return [], debug
 
     num_candidates = n - 2
     base_num_to_prune = min(n + num_frame_to_prune - num_maskmem, num_candidates)
@@ -572,7 +693,7 @@ def plan_memory_pruning(
     if prune_mode not in {"rule_based", "state_aware"}:
         raise ValueError(
             f"Unknown prune_mode={prune_mode!r}. Expected one of: "
-            "efp | rule_based | state_aware."
+            "off | efp | rule_based | state_aware."
         )
 
     # Rule-based baseline weights.
@@ -581,21 +702,27 @@ def plan_memory_pruning(
     geometry_weight = 0.25
     temporal_bonus_weight = 0.0
     num_to_prune = base_num_to_prune
+    state = None
 
     if prune_mode == "state_aware":
         sim_mean = cosine_similarity_to_last_mean(candidate_frames, last_frame)
-        state = estimate_online_state(sim_mean_to_last=sim_mean, memory_meta=memory_meta, device=last_frame.device)
+        state = estimate_online_state(
+            sim_mean_to_last=sim_mean,
+            memory_meta=memory_meta,
+            device=last_frame.device,
+            num_maskmem=num_maskmem,
+            min_temporal_gap=memory_min_temporal_gap,
+        )
         policy_name = select_state_policy(state, controller_cfg=controller_cfg)
         preset = POLICY_PRESETS[policy_name]
 
+        # IMPORTANT: never prune less than the minimum needed to satisfy budget.
         num_to_prune = int(base_num_to_prune + preset["prune_delta"])
-        num_to_prune = max(1, min(num_to_prune, num_candidates))
+        num_to_prune = max(base_num_to_prune, min(num_to_prune, num_candidates))
 
         motion_weight = float(preset["motion_weight"])
         geometry_weight = float(preset["geometry_weight"])
         temporal_bonus_weight = float(preset["temporal_bonus_weight"])
-    else:
-        state = None
 
     scores, score_debug = compute_rule_based_scores(
         score_mode=score_mode,
@@ -629,6 +756,7 @@ def plan_memory_pruning(
             "candidate_frame_idx": [m.get("frame_idx") for m in candidate_meta],
             "candidate_is_conditioning": [m.get("is_conditioning") for m in candidate_meta],
             "state": state,
+            "controller_cfg": dict(DEFAULT_CONTROLLER_CFG, **(controller_cfg or {})) if prune_mode == "state_aware" else None,
         }
     )
     debug.update(score_debug)
