@@ -67,7 +67,7 @@ MAX_VIDEOS=0
 MAX_OBJECTS_PER_VIDEO=0
 THRESHOLD=0.5
 
-LOG_DIR="${SCRIPT_DIR}/logs"
+LOG_DIR="${REPO_ROOT}/shell/endovis2017/logs"
 
 mkdir -p "${LOG_DIR}"
 if [ -z "${CONDA_BIN}" ]; then
