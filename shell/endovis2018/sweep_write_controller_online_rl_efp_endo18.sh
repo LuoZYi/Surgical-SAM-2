@@ -1,4 +1,13 @@
 #!/bin/bash
+#SBATCH --job-name=sweep_online_rl_endo18
+#SBATCH --output=shell/endovis2018/logs/sweep_online_rl_efp_endo18_%j.out
+#SBATCH --error=shell/endovis2018/logs/sweep_online_rl_efp_endo18_%j.err
+#SBATCH --time=48:00:00
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=256G
+#SBATCH --gres=gpu:h100-47:1
+#SBATCH --constraint=xgpi
+
 # Simple train+inference sweep for the Endovis2018 online RL write controller.
 
 set -euo pipefail
