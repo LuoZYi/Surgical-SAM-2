@@ -37,14 +37,7 @@ if [ -z "${REPO_ROOT}" ]; then
   exit 1
 fi
 
-CONDA_BIN=$(command -v conda || true)
-if [ -z "${CONDA_BIN}" ] && [ -x "${HOME}/miniconda3/bin/conda" ]; then
-  CONDA_BIN="${HOME}/miniconda3/bin/conda"
-fi
-if [ -z "${CONDA_BIN}" ] && [ -x "${HOME}/anaconda3/bin/conda" ]; then
-  CONDA_BIN="${HOME}/anaconda3/bin/conda"
-fi
-CONDA_ENV_NAME="sam2"
+VENV_ACTIVATE="/home/e/e0968951/fyp/fyp_env/bin/activate"
 
 DATASET_ROOT="${REPO_ROOT}/dataset/VOS-Endovis18/train"
 SAM2_CFG="configs/sam2.1/sam2.1_hiera_s.yaml"
@@ -70,8 +63,8 @@ THRESHOLD=0.5
 LOG_DIR="${REPO_ROOT}/shell/endovis2018/logs"
 
 mkdir -p "${LOG_DIR}"
-if [ -z "${CONDA_BIN}" ]; then
-  echo "conda command not found in PATH" >&2
+if [ ! -f "${VENV_ACTIVATE}" ]; then
+  echo "python venv activate script not found: ${VENV_ACTIVATE}" >&2
   exit 1
 fi
 if [ ! -f "${SAM2_CHECKPOINT}" ]; then
@@ -81,8 +74,38 @@ fi
 
 cd "${REPO_ROOT}"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH}"
+source "${VENV_ACTIVATE}"
 
-"${CONDA_BIN}" run --no-capture-output -n "${CONDA_ENV_NAME}" python tools/train_write_controller_online_rl.py \
+python - <<'PY'
+import importlib
+import sys
+
+required = [
+    "numpy",
+    "torch",
+    "hydra",
+    "omegaconf",
+    "PIL",
+    "cv2",
+    "skimage",
+    "tqdm",
+    "sympy",
+]
+missing = []
+for name in required:
+    try:
+        importlib.import_module(name)
+    except Exception:
+        missing.append(name)
+
+if missing:
+    print("Missing Python packages in venv:", ", ".join(missing), file=sys.stderr)
+    sys.exit(1)
+
+print("Python dependency check passed.")
+PY
+
+python tools/train_write_controller_online_rl.py \
   --dataset_roots "${DATASET_ROOT}" \
   --sam2_cfg "${SAM2_CFG}" \
   --sam2_checkpoint "${SAM2_CHECKPOINT}" \
