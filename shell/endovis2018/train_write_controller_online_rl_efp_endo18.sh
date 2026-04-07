@@ -42,23 +42,23 @@ VENV_ACTIVATE="/home/e/e0968951/fyp/fyp_env/bin/activate"
 DATASET_ROOT="${REPO_ROOT}/dataset/VOS-Endovis18/train"
 SAM2_CFG="configs/sam2.1/sam2.1_hiera_s.yaml"
 SAM2_CHECKPOINT="${REPO_ROOT}/checkpoints/sam2.1_hiera_s_endo18.pth"
-OUTPUT_CKPT="${REPO_ROOT}/artifacts/offline_write_controller/online_rl_efp_endo18_2018_skip_write_v2.pt"
-OUTPUT_METRICS_JSON="${REPO_ROOT}/artifacts/offline_write_controller/online_rl_efp_endo18_2018_skip_write_v2_metrics.json"
+OUTPUT_CKPT="${REPO_ROOT}/artifacts/offline_write_controller/online_rl_efp_endo18_2018_skip_write_v3.pt"
+OUTPUT_METRICS_JSON="${REPO_ROOT}/artifacts/offline_write_controller/online_rl_efp_endo18_2018_skip_write_v3_metrics.json"
 
-EPOCHS=5
-LR=5e-4
+EPOCHS=20
+LR=3e-4
 WEIGHT_DECAY=1e-4
 HIDDEN_DIMS=(16 8)
 VAL_RATIO=0.25
 SEED=42
 GAMMA=0.98
 REWARD_HORIZON=8
-WRITE_COST=0.01
+WRITE_COST=0.05
 ENTROPY_COEF=1e-3
 GRAD_CLIP=1.0
 MAX_VIDEOS=0
 MAX_OBJECTS_PER_VIDEO=0
-THRESHOLD=0.5
+THRESHOLD=0.6
 
 LOG_DIR="${REPO_ROOT}/shell/endovis2018/logs"
 
