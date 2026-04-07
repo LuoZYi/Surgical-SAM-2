@@ -37,28 +37,28 @@ if [ -z "${REPO_ROOT}" ]; then
   exit 1
 fi
 
-VENV_ACTIVATE="/home/e/e0968951/fyp/fyp_env/bin/activate"
+VENV_ACTIVATE="${VENV_ACTIVATE:-/home/e/e0968951/fyp/fyp_env/bin/activate}"
 
-DATASET_ROOT="${REPO_ROOT}/dataset/VOS-Endovis18/train"
-SAM2_CFG="configs/sam2.1/sam2.1_hiera_s.yaml"
-SAM2_CHECKPOINT="${REPO_ROOT}/checkpoints/sam2.1_hiera_s_endo18.pth"
-OUTPUT_CKPT="${REPO_ROOT}/artifacts/offline_write_controller/online_rl_efp_endo18_2018_skip_write_v3.pt"
-OUTPUT_METRICS_JSON="${REPO_ROOT}/artifacts/offline_write_controller/online_rl_efp_endo18_2018_skip_write_v3_metrics.json"
+DATASET_ROOT="${DATASET_ROOT:-${REPO_ROOT}/dataset/VOS-Endovis18/train}"
+SAM2_CFG="${SAM2_CFG:-configs/sam2.1/sam2.1_hiera_s.yaml}"
+SAM2_CHECKPOINT="${SAM2_CHECKPOINT:-${REPO_ROOT}/checkpoints/sam2.1_hiera_s_endo18.pth}"
+OUTPUT_CKPT="${OUTPUT_CKPT:-${REPO_ROOT}/artifacts/offline_write_controller/online_rl_efp_endo18_2018_skip_write_v4.pt}"
+OUTPUT_METRICS_JSON="${OUTPUT_METRICS_JSON:-${REPO_ROOT}/artifacts/offline_write_controller/online_rl_efp_endo18_2018_skip_write_v4_metrics.json}"
 
-EPOCHS=20
-LR=3e-4
-WEIGHT_DECAY=1e-4
-HIDDEN_DIMS=(16 8)
-VAL_RATIO=0.25
-SEED=42
-GAMMA=0.98
-REWARD_HORIZON=8
-WRITE_COST=0.05
-ENTROPY_COEF=1e-3
-GRAD_CLIP=1.0
-MAX_VIDEOS=0
-MAX_OBJECTS_PER_VIDEO=0
-THRESHOLD=0.6
+EPOCHS="${EPOCHS:-20}"
+LR="${LR:-2e-4}"
+WEIGHT_DECAY="${WEIGHT_DECAY:-1e-4}"
+HIDDEN_DIMS_STR="${HIDDEN_DIMS:-16 8}"
+VAL_RATIO="${VAL_RATIO:-0.25}"
+SEED="${SEED:-42}"
+GAMMA="${GAMMA:-0.98}"
+REWARD_HORIZON="${REWARD_HORIZON:-8}"
+WRITE_COST="${WRITE_COST:-0.02}"
+ENTROPY_COEF="${ENTROPY_COEF:-1e-3}"
+GRAD_CLIP="${GRAD_CLIP:-1.0}"
+MAX_VIDEOS="${MAX_VIDEOS:-0}"
+MAX_OBJECTS_PER_VIDEO="${MAX_OBJECTS_PER_VIDEO:-0}"
+THRESHOLD="${THRESHOLD:-0.5}"
 
 LOG_DIR="${REPO_ROOT}/shell/endovis2018/logs"
 
@@ -75,6 +75,7 @@ fi
 cd "${REPO_ROOT}"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH}"
 source "${VENV_ACTIVATE}"
+read -r -a HIDDEN_DIMS <<< "${HIDDEN_DIMS_STR}"
 
 python - <<'PY'
 import importlib
