@@ -1,0 +1,22 @@
+# @package _group_
+
+name: efp_adaptive_controller_v2
+model:
+  memory_prune_mode: efp
+  memory_score_mode: cosine_only
+  num_frame_to_prune: 2
+  protect_conditioning_memories: false
+  use_recent_memory_guard: false
+  memory_write_mode: adaptive_controller_v2
+  memory_write_similarity_threshold: 0.995
+  memory_write_mask_change_threshold: 0.03
+  memory_write_quality_threshold: 0.55
+  memory_write_min_area: 0.0
+  memory_controller_low_quality_threshold: 0.45
+  memory_controller_skip_centroid_shift_threshold: 0.02
+  memory_controller_aggressive_quality_threshold: 0.65
+  memory_controller_aggressive_similarity_threshold: 0.96
+  memory_controller_aggressive_mask_change_threshold: 0.12
+  memory_controller_aggressive_centroid_shift_threshold: 0.04
+  memory_controller_aggressive_fill_ratio_threshold: 0.75
+  memory_controller_aggressive_prune_delta: 1

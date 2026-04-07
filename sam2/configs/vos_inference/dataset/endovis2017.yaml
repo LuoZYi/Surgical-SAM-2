@@ -1,0 +1,7 @@
+# @package _group_
+
+name: vos_2017
+base_video_dir: ./dataset/VOS-Endovis17/valid/JPEGImages
+input_mask_dir: ./dataset/VOS-Endovis17/valid/VOS/Annotations_vos_instrument
+gt_root: ./dataset/VOS-Endovis17/valid/Annotations
+video_list_file: ./video_txt/2017_val.txt

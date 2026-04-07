@@ -1,0 +1,8 @@
+{
+  "best_val_f1": 0.3750618505690253,
+  "threshold": 0.5750000000000001,
+  "num_train": 10747,
+  "num_val": 3528,
+  "positive_rate_train": 0.13371174037456512,
+  "positive_rate_val": 0.14540816843509674
+}

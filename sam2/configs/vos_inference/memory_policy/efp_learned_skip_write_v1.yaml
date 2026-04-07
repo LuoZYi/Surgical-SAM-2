@@ -1,0 +1,18 @@
+# @package _group_
+
+name: efp_learned_skip_write_v1
+model:
+  memory_prune_mode: efp
+  memory_score_mode: cosine_only
+  num_frame_to_prune: 2
+  protect_conditioning_memories: false
+  use_recent_memory_guard: false
+  memory_write_mode: learned_skip_write_controller
+  memory_write_controller_path: ""
+  memory_write_controller_threshold: -1.0
+  memory_write_similarity_threshold: 0.995
+  memory_write_mask_change_threshold: 0.03
+  memory_write_quality_threshold: 0.55
+  memory_write_min_area: 0.0
+  memory_controller_low_quality_threshold: 0.45
+  memory_controller_skip_centroid_shift_threshold: 0.02

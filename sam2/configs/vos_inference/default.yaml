@@ -1,0 +1,67 @@
+# @package _global_
+
+dataset_name: endovis2017
+memory_policy_name: "off"
+
+sam2_cfg: configs/sam2.1/sam2.1_hiera_s.yaml
+sam2_checkpoint: ./checkpoints/sam2.1_hiera_s_endo18.pth
+output_mask_dir: ./results/${dataset.name}_${memory_policy.name}
+
+score_thresh: 0.0
+use_all_masks: false
+apply_postprocessing: false
+first_frame_prompt_file: null
+gpu_id: 0
+read_frame_interval: 1
+save_frame_interval: 1
+num_processes: 16
+strict: false
+quiet: false
+do_not_skip_first_and_last_frame: false
+dry_run: false
+print_config: false
+model_hydra_overrides_extra: []
+
+model:
+  predictor_target: sam2.sam2_video_predictor_new.SAM2VideoPredictorNew
+  memory_prune_mode: "off"
+  memory_score_mode: cosine_only
+  num_frame_to_prune: 0
+  protect_conditioning_memories: false
+  debug_memory_pruning: false
+  memory_min_temporal_gap: 0
+  use_recent_memory_guard: false
+  recent_memory_min_keep: 1
+  recent_memory_max_keep: 2
+  recent_similarity_threshold: 0.985
+  recent_stability_threshold: 0.72
+  recent_confidence_threshold: 0.60
+  memory_write_mode: "off"
+  memory_write_similarity_threshold: 0.995
+  memory_write_mask_change_threshold: 0.03
+  memory_write_quality_threshold: 0.55
+  memory_write_min_area: 0.0
+  memory_write_controller_path: ""
+  memory_write_controller_threshold: -1.0
+  memory_write_controller_low_threshold: -1.0
+  memory_write_controller_high_threshold: -1.0
+  memory_write_controller_fallback_band: 0.075
+  challenging_mode_detector_path: ""
+  challenging_mode_detector_threshold: -1.0
+  challenging_mode_enter_threshold: -1.0
+  challenging_mode_exit_threshold: -1.0
+  challenging_mode_window_size: 3
+  memory_controller_low_quality_threshold: 0.45
+  memory_controller_skip_centroid_shift_threshold: 0.02
+  memory_controller_conservative_similarity_threshold: 0.95
+  memory_controller_conservative_mask_change_threshold: 0.10
+  memory_controller_conservative_centroid_shift_threshold: 0.03
+  memory_controller_conservative_fill_ratio_threshold: 0.60
+  memory_controller_conservative_prune_delta: 1
+  memory_controller_aggressive_quality_threshold: 0.65
+  memory_controller_aggressive_similarity_threshold: 0.96
+  memory_controller_aggressive_mask_change_threshold: 0.12
+  memory_controller_aggressive_centroid_shift_threshold: 0.04
+  memory_controller_aggressive_fill_ratio_threshold: 0.75
+  memory_controller_aggressive_prune_delta: 1
+  debug_memory_write: false

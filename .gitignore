@@ -16,6 +16,8 @@ model_weights/*
 dataset/*
 logs/*
 results/*
+.conda-env/*
+.venv/*
 
 *.pth
 *.pt

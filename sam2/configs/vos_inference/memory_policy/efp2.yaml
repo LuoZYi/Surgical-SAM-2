@@ -1,0 +1,9 @@
+# @package _group_
+
+name: efp2
+model:
+  memory_prune_mode: efp
+  memory_score_mode: cosine_only
+  num_frame_to_prune: 2
+  protect_conditioning_memories: false
+  use_recent_memory_guard: false

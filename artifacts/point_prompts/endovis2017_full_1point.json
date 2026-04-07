@@ -1,0 +1,348 @@
+{
+  "metadata": {
+    "num_points": 1,
+    "sampling_strategy": "centroid_plus_greedy_farthest_positive"
+  },
+  "videos": {
+    "seq_1": {
+      "objects": {
+        "1": {
+          "frame_name": "00225",
+          "points": [
+            [
+              285.0,
+              559.0
+            ]
+          ],
+          "labels": [
+            1
+          ]
+        },
+        "2": {
+          "frame_name": "00225",
+          "points": [
+            [
+              1179.0,
+              595.0
+            ]
+          ],
+          "labels": [
+            1
+          ]
+        },
+        "4": {
+          "frame_name": "00225",
+          "points": [
+            [
+              930.0,
+              661.0
+            ]
+          ],
+          "labels": [
+            1
+          ]
+        }
+      }
+    },
+    "seq_2": {
+      "objects": {
+        "1": {
+          "frame_name": "00225",
+          "points": [
+            [
+              326.0,
+              566.0
+            ]
+          ],
+          "labels": [
+            1
+          ]
+        },
+        "2": {
+          "frame_name": "00225",
+          "points": [
+            [
+              1164.0,
+              444.0
+            ]
+          ],
+          "labels": [
+            1
+          ]
+        },
+        "4": {
+          "frame_name": "00225",
+          "points": [
+            [
+              866.0,
+              453.0
+            ]
+          ],
+          "labels": [
+            1
+          ]
+        }
+      }
+    },
+    "seq_3": {
+      "objects": {
+        "4": {
+          "frame_name": "00225",
+          "points": [
+            [
+              118.0,
+              351.0
+            ]
+          ],
+          "labels": [
+            1
+          ]
+        },
+        "5": {
+          "frame_name": "00225",
+          "points": [
+            [
+              1204.0,
+              298.0
+            ]
+          ],
+          "labels": [
+            1
+          ]
+        }
+      }
+    },
+    "seq_4": {
+      "objects": {
+        "1": {
+          "frame_name": "00225",
+          "points": [
+            [
+              927.0,
+              935.0
+            ]
+          ],
+          "labels": [
+            1
+          ]
+        },
+        "4": {
+          "frame_name": "00225",
+          "points": [
+            [
+              244.0,
+              297.0
+            ]
+          ],
+          "labels": [
+            1
+          ]
+        },
+        "5": {
+          "frame_name": "00225",
+          "points": [
+            [
+              1064.0,
+              448.0
+            ]
+          ],
+          "labels": [
+            1
+          ]
+        }
+      }
+    },
+    "seq_5": {
+      "objects": {
+        "3": {
+          "frame_name": "00225",
+          "points": [
+            [
+              101.0,
+              259.0
+            ]
+          ],
+          "labels": [
+            1
+          ]
+        },
+        "6": {
+          "frame_name": "00225",
+          "points": [
+            [
+              955.0,
+              109.0
+            ]
+          ],
+          "labels": [
+            1
+          ]
+        }
+      }
+    },
+    "seq_6": {
+      "objects": {
+        "1": {
+          "frame_name": "00225",
+          "points": [
+            [
+              40.0,
+              929.0
+            ]
+          ],
+          "labels": [
+            1
+          ]
+        },
+        "4": {
+          "frame_name": "00225",
+          "points": [
+            [
+              101.0,
+              498.0
+            ]
+          ],
+          "labels": [
+            1
+          ]
+        },
+        "5": {
+          "frame_name": "00225",
+          "points": [
+            [
+              976.0,
+              730.0
+            ]
+          ],
+          "labels": [
+            1
+          ]
+        }
+      }
+    },
+    "seq_7": {
+      "objects": {
+        "3": {
+          "frame_name": "00225",
+          "points": [
+            [
+              926.0,
+              328.0
+            ]
+          ],
+          "labels": [
+            1
+          ]
+        },
+        "6": {
+          "frame_name": "00225",
+          "points": [
+            [
+              1171.0,
+              908.0
+            ]
+          ],
+          "labels": [
+            1
+          ]
+        }
+      }
+    },
+    "seq_8": {
+      "objects": {
+        "3": {
+          "frame_name": "00225",
+          "points": [
+            [
+              245.0,
+              324.0
+            ]
+          ],
+          "labels": [
+            1
+          ]
+        },
+        "8": {
+          "frame_name": "00225",
+          "points": [
+            [
+              970.0,
+              745.0
+            ]
+          ],
+          "labels": [
+            1
+          ]
+        }
+      }
+    },
+    "seq_9": {
+      "objects": {
+        "2": {
+          "frame_name": "00000",
+          "points": [
+            [
+              122.0,
+              442.0
+            ]
+          ],
+          "labels": [
+            1
+          ]
+        },
+        "4": {
+          "frame_name": "00000",
+          "points": [
+            [
+              1140.0,
+              250.0
+            ]
+          ],
+          "labels": [
+            1
+          ]
+        },
+        "6": {
+          "frame_name": "00000",
+          "points": [
+            [
+              936.0,
+              458.0
+            ]
+          ],
+          "labels": [
+            1
+          ]
+        }
+      }
+    },
+    "seq_10": {
+      "objects": {
+        "3": {
+          "frame_name": "00000",
+          "points": [
+            [
+              192.0,
+              611.0
+            ]
+          ],
+          "labels": [
+            1
+          ]
+        },
+        "5": {
+          "frame_name": "00000",
+          "points": [
+            [
+              955.0,
+              476.0
+            ]
+          ],
+          "labels": [
+            1
+          ]
+        }
+      }
+    }
+  }
+}

@@ -34,6 +34,12 @@ Design notes
    budget required by `num_maskmem`. It can prune the minimum amount or more,
    but not less. The true "no pruning" baseline should use `prune_mode="off"`.
 
+5) Optional recent-memory guard:
+   keep the latest memory as usual, and conditionally protect one more recent
+   slot only when it adds short-term value. If the second-most-recent memory is
+   nearly identical to the latest one under a stable/high-confidence state, it
+   is released back to the pruning pool instead of being kept unconditionally.
+
 All functions are inference-safe and gracefully fall back if some metadata
 (e.g. masks / IoU / object score) is unavailable.
 """
@@ -289,6 +295,159 @@ def latest_geometry_stability(
     return _clamp_float_01(0.7 * bbox_iou + 0.3 * area_similarity)
 
 
+def estimate_meta_confidence(meta: Dict[str, Any]) -> float:
+    pred_iou = _as_float(meta.get("pred_iou"), default=-1.0)
+    if pred_iou >= 0.0:
+        return _clamp_float_01(pred_iou)
+
+    obj_score = meta.get("obj_score", None)
+    if obj_score is None:
+        return 0.5
+
+    obj_score = _as_float(obj_score, default=0.0)
+    confidence = float(torch.sigmoid(torch.tensor(obj_score)).item())
+    return _clamp_float_01(confidence)
+
+
+def plan_recent_memory_protection(
+    *,
+    to_cat_memory: Sequence[torch.Tensor],
+    memory_meta: Sequence[Dict[str, Any]],
+    num_to_prune: int,
+    use_recent_memory_guard: bool = False,
+    recent_memory_min_keep: int = 1,
+    recent_memory_max_keep: int = 2,
+    recent_similarity_threshold: float = 0.985,
+    recent_stability_threshold: float = 0.72,
+    recent_confidence_threshold: float = 0.60,
+) -> Tuple[List[int], Dict[str, Any]]:
+    """
+    Decide whether to protect recent slots beyond the latest one.
+
+    The latest temporal memory is already protected by the existing `[1:-1]`
+    candidate construction. This helper only decides whether extra recent slots
+    should also be kept out of the pruning pool.
+    """
+    debug: Dict[str, Any] = {
+        "enabled": use_recent_memory_guard,
+        "recent_memory_min_keep": recent_memory_min_keep,
+        "recent_memory_max_keep": recent_memory_max_keep,
+        "recent_similarity_threshold": recent_similarity_threshold,
+        "recent_stability_threshold": recent_stability_threshold,
+        "recent_confidence_threshold": recent_confidence_threshold,
+        "requested_protected_recent_indices": [],
+        "requested_protected_recent_frame_idx": [],
+        "protected_recent_indices": [],
+        "protected_recent_frame_idx": [],
+        "released_recent_indices": [],
+        "released_recent_frame_idx": [],
+        "slot_decisions": [],
+    }
+
+    if not use_recent_memory_guard:
+        debug["skipped_reason"] = "disabled"
+        return [], debug
+
+    if len(to_cat_memory) <= 2:
+        debug["skipped_reason"] = "insufficient_memory"
+        return [], debug
+
+    recent_memory_min_keep = max(1, int(recent_memory_min_keep))
+    recent_memory_max_keep = max(recent_memory_min_keep, int(recent_memory_max_keep))
+    extra_recent_capacity = max(0, recent_memory_max_keep - 1)
+    required_extra_recent = max(0, recent_memory_min_keep - 1)
+    if extra_recent_capacity <= 0:
+        debug["skipped_reason"] = "no_extra_recent_slots"
+        return [], debug
+
+    temporal_indices = [
+        i
+        for i, meta in enumerate(memory_meta)
+        if int(_as_float(meta.get("t_pos"), default=0.0)) > 0
+    ]
+    if len(temporal_indices) <= 1:
+        debug["skipped_reason"] = "not_enough_temporal_memories"
+        return [], debug
+
+    temporal_indices = sorted(
+        temporal_indices,
+        key=lambda i: (
+            int(_as_float(memory_meta[i].get("t_pos"), default=-1.0)),
+            int(_as_float(memory_meta[i].get("frame_idx"), default=-1.0)),
+        ),
+        reverse=True,
+    )
+
+    latest_idx = temporal_indices[0]
+    latest_meta = memory_meta[latest_idx]
+    latest_frame = to_cat_memory[latest_idx]
+    latest_confidence = estimate_meta_confidence(latest_meta)
+
+    debug["latest_recent_index"] = latest_idx
+    debug["latest_recent_frame_idx"] = latest_meta.get("frame_idx")
+    debug["latest_confidence"] = latest_confidence
+
+    requested_protection: List[int] = []
+    for extra_rank, idx in enumerate(
+        temporal_indices[1 : 1 + extra_recent_capacity],
+        start=1,
+    ):
+        meta = memory_meta[idx]
+        sim_mean = float(
+            cosine_similarity_to_last_mean(
+                to_cat_memory[idx].unsqueeze(0),
+                latest_frame,
+            )[0].item()
+        )
+        geometry_stability = latest_geometry_stability(meta, latest_meta)
+        is_required = extra_rank <= required_extra_recent
+        should_protect = is_required or (
+            sim_mean < recent_similarity_threshold
+            or geometry_stability < recent_stability_threshold
+            or latest_confidence < recent_confidence_threshold
+        )
+
+        debug["slot_decisions"].append(
+            {
+                "index": idx,
+                "frame_idx": meta.get("frame_idx"),
+                "extra_recent_rank": extra_rank,
+                "t_pos": meta.get("t_pos"),
+                "similarity_to_latest_mean": sim_mean,
+                "geometry_stability_to_latest": geometry_stability,
+                "latest_confidence": latest_confidence,
+                "is_required": is_required,
+                "selected_for_protection": should_protect,
+            }
+        )
+
+        if should_protect:
+            requested_protection.append(idx)
+
+    candidate_indices = set(range(1, len(to_cat_memory) - 1))
+    requested_protection = [i for i in requested_protection if i in candidate_indices]
+    debug["requested_protected_recent_indices"] = requested_protection
+    debug["requested_protected_recent_frame_idx"] = [
+        memory_meta[i].get("frame_idx") for i in requested_protection
+    ]
+
+    max_protected_recent = max(0, len(candidate_indices) - num_to_prune)
+    protected_recent = requested_protection[:max_protected_recent]
+    released_recent = requested_protection[max_protected_recent:]
+
+    debug["protected_recent_indices"] = protected_recent
+    debug["protected_recent_frame_idx"] = [
+        memory_meta[i].get("frame_idx") for i in protected_recent
+    ]
+    debug["released_recent_indices"] = released_recent
+    debug["released_recent_frame_idx"] = [
+        memory_meta[i].get("frame_idx") for i in released_recent
+    ]
+    if len(released_recent) > 0:
+        debug["relaxed_for_budget"] = True
+
+    return protected_recent, debug
+
 
 def estimate_online_state(
     sim_mean_to_last: torch.Tensor,
@@ -540,6 +699,7 @@ def select_delete_indices_by_scores(
     num_to_prune: int,
     prefer_non_cond: bool = False,
     similarity_threshold: Optional[float] = None,
+    protected_indices: Optional[Sequence[int]] = None,
 ) -> List[int]:
     """
     Return actual indices in `to_cat_memory` to delete.
@@ -548,13 +708,18 @@ def select_delete_indices_by_scores(
     if num_to_prune <= 0 or len(base_indices) == 0:
         return []
 
+    protected_set = set(protected_indices or [])
+
     if similarity_threshold is not None:
         eligible_local = [
             i for i, score in enumerate(scores.detach().cpu().tolist())
-            if score >= similarity_threshold
+            if score >= similarity_threshold and base_indices[i] not in protected_set
         ]
     else:
-        eligible_local = list(range(len(base_indices)))
+        eligible_local = [
+            i for i in range(len(base_indices))
+            if base_indices[i] not in protected_set
+        ]
 
     def rank_subset(local_ids: List[int], k: int) -> List[int]:
         if k <= 0 or len(local_ids) == 0:
@@ -571,6 +736,7 @@ def select_delete_indices_by_scores(
             remaining_local = [
                 i for i in range(len(base_indices))
                 if base_indices[i] not in already
+                and base_indices[i] not in protected_set
             ]
             chosen.extend(rank_subset(remaining_local, num_to_prune - len(chosen)))
         return chosen
@@ -598,6 +764,7 @@ def select_delete_indices_by_scores(
         remaining_local = [
             i for i in range(len(base_indices))
             if base_indices[i] not in already
+            and base_indices[i] not in protected_set
         ]
         chosen.extend(rank_subset(remaining_local, num_to_prune - len(chosen)))
 
@@ -620,6 +787,12 @@ def plan_memory_pruning(
     memory_similarity_threshold: Optional[float] = None,
     memory_min_temporal_gap: int = 0,
     controller_cfg: Optional[Dict[str, float]] = None,
+    use_recent_memory_guard: bool = False,
+    recent_memory_min_keep: int = 1,
+    recent_memory_max_keep: int = 2,
+    recent_similarity_threshold: float = 0.985,
+    recent_stability_threshold: float = 0.72,
+    recent_confidence_threshold: float = 0.60,
 ) -> Tuple[List[int], Dict[str, Any]]:
     """
     Compute which indices in `to_cat_memory` should be pruned.
@@ -672,9 +845,25 @@ def plan_memory_pruning(
     if prune_mode == "efp":
         similarities_raw = cosine_similarity_to_last_raw(candidate_frames, last_frame)
         similarities_mean = cosine_similarity_to_last_mean(candidate_frames, last_frame)
+        protected_recent_indices, recent_guard_debug = plan_recent_memory_protection(
+            to_cat_memory=to_cat_memory,
+            memory_meta=memory_meta,
+            num_to_prune=base_num_to_prune,
+            use_recent_memory_guard=use_recent_memory_guard,
+            recent_memory_min_keep=recent_memory_min_keep,
+            recent_memory_max_keep=recent_memory_max_keep,
+            recent_similarity_threshold=recent_similarity_threshold,
+            recent_stability_threshold=recent_stability_threshold,
+            recent_confidence_threshold=recent_confidence_threshold,
+        )
 
-        _, sorted_indices = torch.sort(similarities_raw, descending=True)
-        delete_indices = (sorted_indices[:base_num_to_prune] + 1).tolist()
+        delete_indices = select_delete_indices_by_scores(
+            base_indices=base_indices,
+            scores=similarities_raw,
+            metas=candidate_meta,
+            num_to_prune=base_num_to_prune,
+            protected_indices=protected_recent_indices,
+        )
         delete_indices = sorted(delete_indices, reverse=True)
 
         debug = dict(base_debug)
@@ -686,6 +875,11 @@ def plan_memory_pruning(
                 "candidate_is_conditioning": [m.get("is_conditioning") for m in candidate_meta],
                 "candidate_similarities_raw": similarities_raw.detach().cpu().tolist(),
                 "candidate_similarities_mean": similarities_mean.detach().cpu().tolist(),
+                "protected_recent_indices": recent_guard_debug.get("protected_recent_indices", []),
+                "protected_recent_frame_idx": recent_guard_debug.get("protected_recent_frame_idx", []),
+                "released_recent_indices": recent_guard_debug.get("released_recent_indices", []),
+                "released_recent_frame_idx": recent_guard_debug.get("released_recent_frame_idx", []),
+                "recent_guard": recent_guard_debug,
             }
         )
         return delete_indices, debug
@@ -724,6 +918,18 @@ def plan_memory_pruning(
         geometry_weight = float(preset["geometry_weight"])
         temporal_bonus_weight = float(preset["temporal_bonus_weight"])
 
+    protected_recent_indices, recent_guard_debug = plan_recent_memory_protection(
+        to_cat_memory=to_cat_memory,
+        memory_meta=memory_meta,
+        num_to_prune=num_to_prune,
+        use_recent_memory_guard=use_recent_memory_guard,
+        recent_memory_min_keep=recent_memory_min_keep,
+        recent_memory_max_keep=recent_memory_max_keep,
+        recent_similarity_threshold=recent_similarity_threshold,
+        recent_stability_threshold=recent_stability_threshold,
+        recent_confidence_threshold=recent_confidence_threshold,
+    )
+
     scores, score_debug = compute_rule_based_scores(
         score_mode=score_mode,
         candidate_frames=candidate_frames,
@@ -743,6 +949,7 @@ def plan_memory_pruning(
         num_to_prune=num_to_prune,
         prefer_non_cond=protect_conditioning_memories,
         similarity_threshold=memory_similarity_threshold,
+        protected_indices=protected_recent_indices,
     )
     delete_indices = sorted(delete_indices, reverse=True)
 
@@ -757,6 +964,11 @@ def plan_memory_pruning(
             "candidate_is_conditioning": [m.get("is_conditioning") for m in candidate_meta],
             "state": state,
             "controller_cfg": dict(DEFAULT_CONTROLLER_CFG, **(controller_cfg or {})) if prune_mode == "state_aware" else None,
+            "protected_recent_indices": recent_guard_debug.get("protected_recent_indices", []),
+            "protected_recent_frame_idx": recent_guard_debug.get("protected_recent_frame_idx", []),
+            "released_recent_indices": recent_guard_debug.get("released_recent_indices", []),
+            "released_recent_frame_idx": recent_guard_debug.get("released_recent_frame_idx", []),
+            "recent_guard": recent_guard_debug,
         }
     )
     debug.update(score_debug)

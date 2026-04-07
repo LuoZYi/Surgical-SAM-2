@@ -1,0 +1,31 @@
+# @package _group_
+
+name: efp_sliding_window_challenging_controller_v1
+model:
+  memory_prune_mode: efp
+  memory_score_mode: cosine_only
+  num_frame_to_prune: 2
+  protect_conditioning_memories: false
+  use_recent_memory_guard: false
+  memory_write_mode: sliding_window_challenging_controller_v1
+  memory_write_controller_path: ""
+  memory_write_controller_threshold: -1.0
+  memory_write_controller_low_threshold: -1.0
+  memory_write_controller_high_threshold: -1.0
+  memory_write_controller_fallback_band: 0.075
+  challenging_mode_detector_path: ""
+  challenging_mode_detector_threshold: -1.0
+  challenging_mode_enter_threshold: -1.0
+  challenging_mode_exit_threshold: -1.0
+  challenging_mode_window_size: 3
+  memory_write_similarity_threshold: 0.995
+  memory_write_mask_change_threshold: 0.03
+  memory_write_quality_threshold: 0.55
+  memory_write_min_area: 0.0
+  memory_controller_low_quality_threshold: 0.45
+  memory_controller_skip_centroid_shift_threshold: 0.02
+  memory_controller_conservative_similarity_threshold: 0.95
+  memory_controller_conservative_mask_change_threshold: 0.10
+  memory_controller_conservative_centroid_shift_threshold: 0.03
+  memory_controller_conservative_fill_ratio_threshold: 0.60
+  memory_controller_conservative_prune_delta: 1

@@ -1,0 +1,12 @@
+{
+  "best_val_f1": 0.8063133281371784,
+  "threshold": 0.375,
+  "num_train": 10747,
+  "num_val": 3528,
+  "positive_rate_train": 0.6091932654380798,
+  "positive_rate_val": 0.660997748374939,
+  "window_size": 3,
+  "label_low_iou_threshold": 0.82,
+  "label_gain_threshold": 0.01,
+  "label_novelty_threshold": 0.12
+}

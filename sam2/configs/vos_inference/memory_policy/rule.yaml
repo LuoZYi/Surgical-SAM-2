@@ -1,0 +1,9 @@
+# @package _group_
+
+name: rule
+model:
+  memory_prune_mode: rule_based
+  memory_score_mode: cosine_only
+  num_frame_to_prune: 2
+  protect_conditioning_memories: true
+  use_recent_memory_guard: false

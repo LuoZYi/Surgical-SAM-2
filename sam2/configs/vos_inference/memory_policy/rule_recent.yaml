@@ -1,0 +1,14 @@
+# @package _group_
+
+name: rule_recent
+model:
+  memory_prune_mode: rule_based
+  memory_score_mode: cosine_only
+  num_frame_to_prune: 2
+  protect_conditioning_memories: true
+  use_recent_memory_guard: true
+  recent_memory_min_keep: 1
+  recent_memory_max_keep: 2
+  recent_similarity_threshold: 0.985
+  recent_stability_threshold: 0.72
+  recent_confidence_threshold: 0.60

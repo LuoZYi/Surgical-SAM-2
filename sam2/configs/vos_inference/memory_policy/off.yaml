@@ -1,0 +1,9 @@
+# @package _group_
+
+name: "off"
+model:
+  memory_prune_mode: "off"
+  memory_score_mode: cosine_only
+  num_frame_to_prune: 0
+  protect_conditioning_memories: false
+  use_recent_memory_guard: false
