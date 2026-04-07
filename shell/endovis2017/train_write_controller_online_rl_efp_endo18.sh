@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=train_rl_efp_endo18_2017
-#SBATCH --output=shell/endovis2017/logs/train_write_controller_online_rl_efp_endo18_%j.out
-#SBATCH --error=shell/endovis2017/logs/train_write_controller_online_rl_efp_endo18_%j.err
+#SBATCH --output=logs/train_write_controller_online_rl_efp_endo18_%j.out
+#SBATCH --error=logs/train_write_controller_online_rl_efp_endo18_%j.err
 #SBATCH --time=24:00:00        
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=256G                
@@ -18,8 +18,32 @@ export NUMEXPR_NUM_THREADS=1
 export PYTHONUNBUFFERED=1
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-REPO_ROOT=$(cd "${SCRIPT_DIR}/../.." && pwd)
-CONDA_BIN=$(command -v conda)
+REPO_ROOT=""
+for CANDIDATE in \
+  "${SLURM_SUBMIT_DIR:-}" \
+  "${SLURM_SUBMIT_DIR:-}/.." \
+  "${SLURM_SUBMIT_DIR:-}/../.." \
+  "$(pwd)" \
+  "$(pwd)/.." \
+  "$(pwd)/../.."
+do
+  if [ -n "${CANDIDATE}" ] && [ -f "${CANDIDATE}/tools/train_write_controller_online_rl.py" ]; then
+    REPO_ROOT=$(cd "${CANDIDATE}" && pwd)
+    break
+  fi
+done
+if [ -z "${REPO_ROOT}" ]; then
+  echo "failed to locate repo root; please submit the job from inside the Surgical-SAM-2 repo" >&2
+  exit 1
+fi
+
+CONDA_BIN=$(command -v conda || true)
+if [ -z "${CONDA_BIN}" ] && [ -x "${HOME}/miniconda3/bin/conda" ]; then
+  CONDA_BIN="${HOME}/miniconda3/bin/conda"
+fi
+if [ -z "${CONDA_BIN}" ] && [ -x "${HOME}/anaconda3/bin/conda" ]; then
+  CONDA_BIN="${HOME}/anaconda3/bin/conda"
+fi
 CONDA_ENV_NAME="sam2"
 
 DATASET_ROOT="${REPO_ROOT}/dataset/VOS-Endovis17/train"
