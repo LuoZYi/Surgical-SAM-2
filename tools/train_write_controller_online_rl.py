@@ -202,6 +202,8 @@ def evaluate_policy_on_specs(
     episode_dice = []
     episode_returns = []
     episode_write_rates = []
+    episode_controller_prob_means = []
+    episode_prob_ge_threshold_rates = []
     for spec in specs:
         result = run_episode(
             predictor=predictor,
@@ -220,10 +222,22 @@ def evaluate_policy_on_specs(
         episode_dice.append(result["mean_dice"])
         episode_returns.append(result["episode_return"])
         episode_write_rates.append(result["write_rate"])
+        episode_controller_prob_means.append(result["mean_controller_prob"])
+        episode_prob_ge_threshold_rates.append(result["prob_ge_threshold_rate"])
     return {
         "mean_dice": float(np.mean(episode_dice)) if episode_dice else 0.0,
         "mean_return": float(np.mean(episode_returns)) if episode_returns else 0.0,
         "mean_write_rate": float(np.mean(episode_write_rates)) if episode_write_rates else 0.0,
+        "mean_controller_prob": (
+            float(np.mean(episode_controller_prob_means))
+            if episode_controller_prob_means
+            else 0.0
+        ),
+        "mean_prob_ge_threshold_rate": (
+            float(np.mean(episode_prob_ge_threshold_rates))
+            if episode_prob_ge_threshold_rates
+            else 0.0
+        ),
     }
 
 
@@ -264,6 +278,7 @@ def run_episode(
     entropies: List[torch.Tensor] = []
     actions: List[float] = []
     dice_scores: List[float] = []
+    controller_probs: List[float] = []
 
     def external_policy(debug: Dict[str, object]) -> Dict[str, object]:
         features = build_feature_vector(debug, DEFAULT_WRITE_FEATURE_NAMES)
@@ -272,6 +287,7 @@ def run_episode(
             x = torch.tensor(features.tolist(), dtype=torch.float32).unsqueeze(0)
             logits = policy(x).squeeze(0)
             prob = torch.sigmoid(logits)
+            prob_value = float(prob.detach().cpu().item())
             if train_mode:
                 dist = Bernoulli(logits=logits)
                 action = dist.sample()
@@ -281,11 +297,12 @@ def run_episode(
                 action = (prob >= threshold).to(dtype=torch.float32)
         action_value = float(action.item())
         actions.append(action_value)
+        controller_probs.append(prob_value)
         return {
             "write_memory": bool(action_value >= 0.5),
             "action": "WRITE_NORMAL" if action_value >= 0.5 else "SKIP_WRITE",
             "reason": "online_rl_policy",
-            "controller_prob": float(prob.detach().cpu().item()),
+            "controller_prob": prob_value,
             "controller_threshold": float(threshold),
         }
 
@@ -327,17 +344,26 @@ def run_episode(
     episode_return = float(np.mean(rewards)) if len(rewards) > 0 else 0.0
     mean_dice = float(np.mean(dice_scores)) if len(dice_scores) > 0 else 0.0
     write_rate = float(np.mean(actions)) if len(actions) > 0 else 0.0
+    mean_controller_prob = float(np.mean(controller_probs)) if controller_probs else 0.0
+    prob_ge_threshold_rate = (
+        float(np.mean(np.asarray(controller_probs, dtype=np.float32) >= float(threshold)))
+        if controller_probs
+        else 0.0
+    )
 
     return {
         "log_probs": log_probs,
         "entropies": entropies,
         "actions": actions,
+        "controller_probs": controller_probs,
         "dice_scores": dice_scores,
         "rewards": rewards,
         "returns": returns,
         "episode_return": episode_return,
         "mean_dice": mean_dice,
         "write_rate": write_rate,
+        "mean_controller_prob": mean_controller_prob,
+        "prob_ge_threshold_rate": prob_ge_threshold_rate,
     }
 
 
@@ -439,6 +465,8 @@ def main() -> None:
         train_returns = []
         train_dice = []
         train_write_rates = []
+        train_controller_prob_means = []
+        train_prob_ge_threshold_rates = []
         train_losses = []
 
         for spec in train_specs:
@@ -482,6 +510,8 @@ def main() -> None:
             train_returns.append(float(episode["episode_return"]))
             train_dice.append(float(episode["mean_dice"]))
             train_write_rates.append(float(episode["write_rate"]))
+            train_controller_prob_means.append(float(episode["mean_controller_prob"]))
+            train_prob_ge_threshold_rates.append(float(episode["prob_ge_threshold_rate"]))
             train_losses.append(float(loss.item()))
 
         policy.eval()
@@ -505,10 +535,14 @@ def main() -> None:
             f"train_dice={np.mean(train_dice) if train_dice else 0.0:.4f} "
             f"train_return={np.mean(train_returns) if train_returns else 0.0:.4f} "
             f"train_write_rate={np.mean(train_write_rates) if train_write_rates else 0.0:.4f} "
+            f"train_ctrl_prob={np.mean(train_controller_prob_means) if train_controller_prob_means else 0.0:.4f} "
+            f"train_prob_ge_threshold={np.mean(train_prob_ge_threshold_rates) if train_prob_ge_threshold_rates else 0.0:.4f} "
             f"train_loss={np.mean(train_losses) if train_losses else 0.0:.4f} "
             f"val_dice={val_metrics['mean_dice']:.4f} "
             f"val_return={val_metrics['mean_return']:.4f} "
-            f"val_write_rate={val_metrics['mean_write_rate']:.4f}"
+            f"val_write_rate={val_metrics['mean_write_rate']:.4f} "
+            f"val_ctrl_prob={val_metrics['mean_controller_prob']:.4f} "
+            f"val_prob_ge_threshold={val_metrics['mean_prob_ge_threshold_rate']:.4f}"
         )
 
         if best_metrics is None or val_metrics["mean_dice"] > best_metrics["mean_dice"]:
@@ -535,6 +569,12 @@ def main() -> None:
         "best_val_dice": float(best_metrics["mean_dice"]) if best_metrics else 0.0,
         "best_val_return": float(best_metrics["mean_return"]) if best_metrics else 0.0,
         "best_val_write_rate": float(best_metrics["mean_write_rate"]) if best_metrics else 0.0,
+        "best_val_controller_prob": (
+            float(best_metrics["mean_controller_prob"]) if best_metrics else 0.0
+        ),
+        "best_val_prob_ge_threshold_rate": (
+            float(best_metrics["mean_prob_ge_threshold_rate"]) if best_metrics else 0.0
+        ),
         "num_train_episodes": int(len(train_specs)),
         "num_val_episodes": int(len(val_specs)),
     }
@@ -556,6 +596,14 @@ def main() -> None:
                     "best_val_dice": float(best_metrics["mean_dice"]) if best_metrics else 0.0,
                     "best_val_return": float(best_metrics["mean_return"]) if best_metrics else 0.0,
                     "best_val_write_rate": float(best_metrics["mean_write_rate"]) if best_metrics else 0.0,
+                    "best_val_controller_prob": (
+                        float(best_metrics["mean_controller_prob"]) if best_metrics else 0.0
+                    ),
+                    "best_val_prob_ge_threshold_rate": (
+                        float(best_metrics["mean_prob_ge_threshold_rate"])
+                        if best_metrics
+                        else 0.0
+                    ),
                     "num_train_episodes": int(len(train_specs)),
                     "num_val_episodes": int(len(val_specs)),
                 },

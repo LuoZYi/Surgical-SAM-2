@@ -42,8 +42,8 @@ VENV_ACTIVATE="/home/e/e0968951/fyp/fyp_env/bin/activate"
 DATASET_ROOT="${REPO_ROOT}/dataset/VOS-Endovis18/train"
 SAM2_CFG="configs/sam2.1/sam2.1_hiera_s.yaml"
 SAM2_CHECKPOINT="${REPO_ROOT}/checkpoints/sam2.1_hiera_s_endo18.pth"
-OUTPUT_CKPT="${REPO_ROOT}/artifacts/offline_write_controller/online_rl_efp_endo18_2018_skip_write_v1.pt"
-OUTPUT_METRICS_JSON="${REPO_ROOT}/artifacts/offline_write_controller/online_rl_efp_endo18_2018_skip_write_v1_metrics.json"
+OUTPUT_CKPT="${REPO_ROOT}/artifacts/offline_write_controller/online_rl_efp_endo18_2018_skip_write_v2.pt"
+OUTPUT_METRICS_JSON="${REPO_ROOT}/artifacts/offline_write_controller/online_rl_efp_endo18_2018_skip_write_v2_metrics.json"
 
 EPOCHS=5
 LR=5e-4
