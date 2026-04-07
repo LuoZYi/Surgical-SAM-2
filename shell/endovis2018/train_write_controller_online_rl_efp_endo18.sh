@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=train_rl_efp_endo18_2018
-#SBATCH --output=shell/endovis2018/logs/train_write_controller_online_rl_efp_endo18_%j.out
-#SBATCH --error=shell/endovis2018/logs/train_write_controller_online_rl_efp_endo18_%j.err
+#SBATCH --output=logs/train_write_controller_online_rl_efp_endo18_%j.out
+#SBATCH --error=logs/train_write_controller_online_rl_efp_endo18_%j.err
 #SBATCH --time=24:00:00        
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=256G                
